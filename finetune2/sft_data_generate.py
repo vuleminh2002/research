@@ -2,8 +2,8 @@ import json, random
 from tqdm import tqdm
 
 INPUT_FILE = "businesses.jsonl"
-OUTPUT_FILE = "geocode_train_randomized2.jsonl"
-NUM_SAMPLES = 20
+OUTPUT_FILE = "geocode_train_randomized.jsonl"
+NUM_SAMPLES = 3500
 CANDIDATE_RANGE = (8, 14)
 MAX_ATTEMPTS = 15
 INSIDE_TARGET_RANGE = (0, 10)  # random target number of inside points per example
@@ -64,18 +64,13 @@ def generate_example():
             lon_lo = rect['top_left']['lon']
             lon_hi = rect['bottom_right']['lon']
 
-            for p in sample:
+            for idx, p in enumerate(sample, 1):
                 inside, inside_lat, inside_lon = label_point(p, rect)
-                lat_mark = "✓" if inside_lat else "✗"
-                lon_mark = "✓" if inside_lon else "✗"
+                lat_phrase = f"lat {p['lat']:.4f} {'in' if inside_lat else 'not in'} [{lat_lo:.4f}, {lat_hi:.4f}]"
+                lon_phrase = f"lon {p['lon']:.4f} {'in' if inside_lon else 'not in'} [{lon_lo:.4f}, {lon_hi:.4f}]"
                 decision_phrase = "inside" if inside else "outside"
 
-                reasoning_line = (
-                    f"- {p['id']}: "
-                    f"lat {p['lat']:.4f} {lat_mark} [{lat_lo:.4f}–{lat_hi:.4f}], "
-                    f"lon {p['lon']:.4f} {lon_mark} [{lon_lo:.4f}–{lon_hi:.4f}] "
-                    f"→ {decision_phrase}"
-                )
+                reasoning_line = f"{idx}. {p['id']} → {lat_phrase}; {lon_phrase} → {decision_phrase}"
                 reasoning_lines.append(reasoning_line)
 
                 if inside:
@@ -87,8 +82,8 @@ def generate_example():
                 return {
                     "instruction": (
                         "Classify each candidate business as inside or outside the given rectangular range "
-                        "based on its latitude and longitude. Output step-by-step reasoning, then the final "
-                        "inside_ids and outside_ids lists."
+                        "based on its latitude and longitude. Output reasoning for each candidate, then list "
+                        "final inside_ids and outside_ids."
                     ),
                     "input": (
                         "Rectangle:\n"
@@ -98,7 +93,7 @@ def generate_example():
                         "\n".join([f"  {p['id']}: ({p['lat']:.4f}, {p['lon']:.4f})" for p in sample])
                     ),
                     "output": (
-                        "Step-by-step reasoning:\n" +
+                        "Reasoning:\n" +
                         "\n".join(reasoning_lines) + "\n\n" +
                         f"inside_ids: {inside_ids}\n" +
                         f"outside_ids: {outside_ids}"
@@ -111,7 +106,7 @@ def generate_example():
     return None
 
 
-print("🚀 Generating randomized inside-count dataset...")
+print("🚀 Generating dataset with improved reasoning format...")
 with open(OUTPUT_FILE, "w") as f:
     for _ in tqdm(range(NUM_SAMPLES)):
         ex = generate_example()
