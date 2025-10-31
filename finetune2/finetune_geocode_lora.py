@@ -1,7 +1,6 @@
-import torch, gc
+import torch, gc, math, csv
 gc.collect()
 torch.cuda.empty_cache()
-
 
 from datasets import load_dataset
 from transformers import (
@@ -14,7 +13,6 @@ from transformers import (
     BitsAndBytesConfig,
 )
 from peft import LoraConfig, get_peft_model
-import torch
 
 # ============================================================
 # 1. Load dataset
@@ -30,10 +28,10 @@ model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 tokenizer.pad_token = tokenizer.eos_token
 
-# ✅ Modern quantization config (instead of load_in_8bit)
 bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.float16,
+    load_in_8bit=True,
+    llm_int8_threshold=6.0,
+    llm_int8_skip_modules=None,
 )
 
 model = AutoModelForCausalLM.from_pretrained(
@@ -46,9 +44,9 @@ model = AutoModelForCausalLM.from_pretrained(
 # 3. Apply LoRA
 # ============================================================
 lora_config = LoraConfig(
-    r=32,                   # ✅ higher rank = more expressive updates
-    lora_alpha=64,          # ✅ balanced scaling
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],  # ✅ cover all attention projections
+    r=32,
+    lora_alpha=64,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
     lora_dropout=0.05,
     bias="none",
     task_type="CAUSAL_LM",
@@ -68,46 +66,57 @@ def format_example(example):
         prompt,
         truncation=True,
         padding="max_length",
-        max_length=2048,  # ✅ Reduced for speed
+        max_length=2048,
     )
 
 tokenized_train = train_ds.map(format_example, remove_columns=train_ds.column_names)
 tokenized_val = val_ds.map(format_example, remove_columns=val_ds.column_names)
 
-# ============================================================
-# 5. Data collator
-# ============================================================
 data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+
+# ============================================================
+# 5. Compute metrics (eval_loss + perplexity)
+# ============================================================
+def compute_metrics(eval_pred):
+    loss = eval_pred.metrics["eval_loss"]
+    perplexity = math.exp(loss) if loss < 20 else float("inf")
+    print(f"\n📊 Eval loss: {loss:.4f} | Perplexity: {perplexity:.2f}")
+    return {"eval_loss": loss, "perplexity": perplexity}
 
 # ============================================================
 # 6. Training configuration
 # ============================================================
 training_args = TrainingArguments(
     output_dir="tinyllama-geocode-lora",
-    per_device_train_batch_size=8,            # ✅ was 2 → now 8 (use GPU VRAM fully)
-    gradient_accumulation_steps=2,            # ✅ keeps total batch size manageable
-    num_train_epochs=8,                       # ✅ longer training improves pattern learning
-    learning_rate=3e-4,                       # ✅ slightly higher; faster convergence
-    lr_scheduler_type="constant",             # ✅ no decay—keeps learning signal strong
-    warmup_ratio=0.03,                        # ✅ small warmup prevents early spikes
-    fp16=True,                                # ✅ fast training on modern GPUs
-    logging_steps=25,                         # ✅ more frequent logs
-    eval_strategy="steps",                    # ✅ evaluate every few hundred steps
-    eval_steps=200,                           # ✅ earlier feedback loops
-    save_steps=400,                           # ✅ frequent checkpoints (in case of crash)
-    save_total_limit=3,                       # ✅ keeps storage clean
+    per_device_train_batch_size=8,
+    gradient_accumulation_steps=2,
+    num_train_epochs=8,
+    learning_rate=3e-4,
+    lr_scheduler_type="constant",
+    warmup_ratio=0.03,
+    fp16=True,
+    logging_steps=25,
+    eval_strategy="steps",
+    eval_steps=200,
+    save_steps=400,
+    save_total_limit=3,
     report_to="none",
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
     greater_is_better=False,
-    optim="adamw_torch_fused",                # ✅ fused optimizer = faster
-    dataloader_num_workers=4,                 # ✅ better I/O throughput
-    max_grad_norm=1.0,  
+    optim="adamw_torch_fused",
+    dataloader_num_workers=4,
+    max_grad_norm=1.0,
 )
 
 # ============================================================
 # 7. Trainer setup
 # ============================================================
+model.enable_input_require_grads()
+model.gradient_checkpointing_enable()
+model.config.use_cache = False
+torch.backends.cudnn.benchmark = True
+
 trainer = Trainer(
     model=model,
     args=training_args,
@@ -118,11 +127,29 @@ trainer = Trainer(
 )
 
 # ============================================================
-# 8. Train and save
+# 8. Custom logger for eval loss + perplexity
 # ============================================================
+log_file = "training_log.csv"
+with open(log_file, "w", newline="") as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(["step", "eval_loss", "perplexity"])
 
-torch.backends.cudnn.benchmark = True  # ✅ Slight speed boost
+    # Train loop with eval tracking
+    for epoch in range(int(training_args.num_train_epochs)):
+        print(f"\n🚀 Epoch {epoch + 1}/{int(training_args.num_train_epochs)}")
+        trainer.train()
 
-trainer.train()
+        metrics = trainer.evaluate()
+        loss = metrics["eval_loss"]
+        perplexity = math.exp(loss) if loss < 20 else float("inf")
+        print(f"✅ Epoch {epoch + 1}: Eval loss = {loss:.4f}, Perplexity = {perplexity:.2f}")
+
+        writer.writerow([epoch + 1, loss, perplexity])
+        csvfile.flush()
+
+# ============================================================
+# 9. Save model
+# ============================================================
 model.save_pretrained("tinyllama-geocode-lora")
 print("✅ Done! Adapter saved to tinyllama-geocode-lora")
+print(f"📈 All eval metrics logged to {log_file}")
