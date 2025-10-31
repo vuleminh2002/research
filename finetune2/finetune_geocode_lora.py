@@ -1,3 +1,8 @@
+import torch, gc
+gc.collect()
+torch.cuda.empty_cache()
+
+
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
