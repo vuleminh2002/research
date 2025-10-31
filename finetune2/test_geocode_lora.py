@@ -68,7 +68,7 @@ for i, ex in enumerate(tqdm(examples, desc="Evaluating samples")):
         f"### Input:\n{ex['input']}\n\n"
         f"### Response:\n"
     )
-    output = pipe(prompt, max_new_tokens=512)[0]["generated_text"]
+    output = pipe(prompt, max_new_tokens=3000)[0]["generated_text"]
     response_text = output.strip()
 
 
@@ -85,9 +85,9 @@ for i, ex in enumerate(tqdm(examples, desc="Evaluating samples")):
     # Print detailed result
     print(f"\n{'='*80}")
     print(f"🧩 SAMPLE {i+1}")
-    print(f"📥 INPUT:\n{ex['input'][:500]}...\n")
+    print(f"📥 INPUT:\n{ex['input']}\n")
     print(f"🤖 FULL MODEL OUTPUT:\n{response_text}\n")
-    print(f"🎯 GROUND TRUTH:\n{ex['output'][:700]}\n")
+    print(f"🎯 GROUND TRUTH:\n{ex['output']}\n")
     print(f"🔍 Parsed inside_ids (pred): {pred_inside}")
     print(f"✅ Parsed inside_ids (true): {gt_inside}")
     print(f"{'='*80}\n")
