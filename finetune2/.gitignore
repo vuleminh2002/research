@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+*.egg-info/
+.eggs/
+.venv/
+.conda/
+.env
+.env.*
+.python-version
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs & outputs
+logs/
+*.log
+outputs/
+wandb/
+.cache/
+cache/
+hf_cache/
+
+# Model artifacts (large files)
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+*.ckpt
+
+# Training outputs
+tinyllama-geocode-lora/
+
+# Checkpoints
+checkpoints/
