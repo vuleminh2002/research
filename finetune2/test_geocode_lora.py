@@ -69,7 +69,8 @@ for i, ex in enumerate(tqdm(examples, desc="Evaluating samples")):
         f"### Response:\n"
     )
     output = pipe(prompt, max_new_tokens=512)[0]["generated_text"]
-    response_text = output.split("### Response:")[-1].strip()
+    response_text = output.strip()
+
 
     # Extract IDs
     gt_inside = extract_ids(ex["output"], "inside_ids")
