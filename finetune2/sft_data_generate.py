@@ -68,7 +68,7 @@ def generate_example():
                 inside, inside_lat, inside_lon = label_point(p, rect)
                 lat_mark = "✓" if inside_lat else "✗"
                 lon_mark = "✓" if inside_lon else "✗"
-                decision_phrase = "both inside → inside" if inside else "one/both outside → outside"
+                decision_phrase = "inside" if inside else "outside"
 
                 reasoning_line = (
                     f"- {p['id']}: "

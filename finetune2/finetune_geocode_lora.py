@@ -41,9 +41,9 @@ model = AutoModelForCausalLM.from_pretrained(
 # 3. Apply LoRA
 # ============================================================
 lora_config = LoraConfig(
-    r=8,
-    lora_alpha=16,
-    target_modules=["q_proj", "v_proj"],
+    r=32,                   # ✅ higher rank = more expressive updates
+    lora_alpha=64,          # ✅ balanced scaling
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],  # ✅ cover all attention projections
     lora_dropout=0.05,
     bias="none",
     task_type="CAUSAL_LM",
@@ -79,23 +79,25 @@ data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 # ============================================================
 training_args = TrainingArguments(
     output_dir="tinyllama-geocode-lora",
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,  # ✅ Faster updates
-    num_train_epochs=3,
-    learning_rate=2e-4,
-    fp16=True,
-    do_eval=True,  # ✅ Replaces deprecated evaluation_strategy
-    eval_strategy="steps",  # For modern versions
-    eval_steps=300,  # ✅ Less frequent evals
-    save_steps=600,
-    logging_steps=100,
-    save_total_limit=2,
+    per_device_train_batch_size=8,            # ✅ was 2 → now 8 (use GPU VRAM fully)
+    gradient_accumulation_steps=2,            # ✅ keeps total batch size manageable
+    num_train_epochs=8,                       # ✅ longer training improves pattern learning
+    learning_rate=3e-4,                       # ✅ slightly higher; faster convergence
+    lr_scheduler_type="constant",             # ✅ no decay—keeps learning signal strong
+    warmup_ratio=0.03,                        # ✅ small warmup prevents early spikes
+    fp16=True,                                # ✅ fast training on modern GPUs
+    logging_steps=25,                         # ✅ more frequent logs
+    eval_strategy="steps",                    # ✅ evaluate every few hundred steps
+    eval_steps=200,                           # ✅ earlier feedback loops
+    save_steps=400,                           # ✅ frequent checkpoints (in case of crash)
+    save_total_limit=3,                       # ✅ keeps storage clean
     report_to="none",
-    lr_scheduler_type="cosine",
-    warmup_ratio=0.05,
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
     greater_is_better=False,
+    optim="adamw_torch_fused",                # ✅ fused optimizer = faster
+    dataloader_num_workers=4,                 # ✅ better I/O throughput
+    max_grad_norm=1.0,  
 )
 
 # ============================================================
