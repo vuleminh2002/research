@@ -10,7 +10,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_sc
 # ============================================================
 base_model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 adapter_dir = "tinyllama-geocode-lora"
-data_file = "geocode_train_randomized.jsonl"
+data_file = "geocode_train_randomized2.jsonl"
 
 print("🚀 Loading base model + LoRA adapter...")
 tokenizer = AutoTokenizer.from_pretrained(base_model_name)
