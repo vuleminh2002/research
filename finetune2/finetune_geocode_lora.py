@@ -120,9 +120,9 @@ trainer = Trainer(
 # ============================================================
 # 8. Train and save
 # ============================================================
-model.gradient_checkpointing_enable()  # save VRAM by recomputing activations
-torch.cuda.empty_cache()
+
 torch.backends.cudnn.benchmark = True  # ✅ Slight speed boost
+
 trainer.train()
 model.save_pretrained("tinyllama-geocode-lora")
 print("✅ Done! Adapter saved to tinyllama-geocode-lora")
