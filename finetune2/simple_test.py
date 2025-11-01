@@ -51,7 +51,7 @@ for i, sample in enumerate(data, 1):
     # ------------------------------------------------------------
     result = pipe(
         prompt,
-        max_new_tokens=1300,
+        max_new_tokens=1500,
         temperature=0.2,
         top_p=0.9,
         do_sample=False,
