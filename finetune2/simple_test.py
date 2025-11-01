@@ -60,6 +60,13 @@ for i, sample in enumerate(data, 1):
     # extract only generated part
     model_output = result.split("### Response:")[-1].strip()
 
+    # 🧹 Quick cleanup: cut after outside_ids
+    if "outside_ids" in model_output:
+        model_output = model_output.split("outside_ids:")  # split into parts
+        model_output = model_output[0] + "outside_ids:" + model_output[-1].split("\n")[0]
+
+    # Optional: also stop at the next '###' section if model repeats the prompt
+    model_output = model_output.split("###")[0].strip()
     # show raw output
     print("🤖 MODEL OUTPUT:\n")
     print(model_output)
