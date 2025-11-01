@@ -51,7 +51,7 @@ for i, sample in enumerate(data, 1):
     # ------------------------------------------------------------
     result = pipe(
         prompt,
-        max_new_tokens=1000,
+        max_new_tokens=2000,
         temperature=0.2,
         top_p=0.9,
         do_sample=False,
@@ -63,6 +63,12 @@ for i, sample in enumerate(data, 1):
     # show raw output
     print("🤖 MODEL OUTPUT:\n")
     print(model_output)
+    
+    # ------------------------------------------------------------
+    # Show ground truth
+    # ------------------------------------------------------------
+    print(f"\n🎯 GROUND TRUTH:\n")
+    print(ground_truth)
 
     # ------------------------------------------------------------
     # Compare to ground truth
