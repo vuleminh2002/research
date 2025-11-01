@@ -2,8 +2,8 @@ import json, random
 from tqdm import tqdm
 
 INPUT_FILE = "businesses.jsonl"
-OUTPUT_FILE = "geocode_train_randomized.jsonl"
-NUM_SAMPLES = 3500
+OUTPUT_FILE = "geocode_train_randomized3.jsonl"
+NUM_SAMPLES = 10
 CANDIDATE_RANGE = (8, 14)
 MAX_ATTEMPTS = 15
 INSIDE_TARGET_RANGE = (0, 10)  # random target number of inside points per example
