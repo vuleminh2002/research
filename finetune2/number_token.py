@@ -8,7 +8,7 @@ tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
 # 2️⃣ Iterate through all examples
 lengths = []
-with open("geocode_train_randomized.jsonl", "r", encoding="utf-8") as f:
+with open("geocode_train_randomized4.jsonl", "r", encoding="utf-8") as f:
     for line in tqdm(f, desc="Tokenizing examples"):
         ex = json.loads(line)
         text = (
