@@ -8,8 +8,8 @@ from difflib import SequenceMatcher
 # ============================================================
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 ADAPTER_PATH = "tinyllama-geocode-lora"  # your LoRA checkpoint
-DATA_FILE = "geocode_train_randomized4.jsonl"  # your 10-sample test file
-MAX_SAMPLES = 10
+DATA_FILE = "geocode_train_randomized5.jsonl"  # your 10-sample test file
+MAX_SAMPLES = 1
 
 # ============================================================
 # 2. Load Model + Tokenizer
@@ -136,25 +136,19 @@ for i, sample in enumerate(data, 1):
     # ------------------------------------------------------------
     result = pipe(
         prompt,
-        max_new_tokens=1700,
+        max_new_tokens=3000,
         temperature=0.2,
         top_p=0.9,
         do_sample=False,
     )[0]["generated_text"]
 
-    # extract only generated part
-    model_output = result.split("### Response:")[-1].strip()
-
-    # 🧹 Quick cleanup: cut after outside_ids
-    if "outside_ids" in model_output:
-        model_output = model_output.split("outside_ids:")  # split into parts
-        model_output = model_output[0] + "outside_ids:" + model_output[-1].split("\n")[0]
-
-    # Optional: also stop at the next '###' section if model repeats the prompt
-    model_output = model_output.split("###")[0].strip()
-    # show raw output
-    print("🤖 MODEL OUTPUT:\n")
-    print(model_output)
+    # Show complete raw model output (everything)
+    print("🤖 COMPLETE MODEL OUTPUT:\n")
+    print(result)
+    print("\n" + "="*80 + "\n")
+    
+    # Use the complete raw result for extraction (no early splitting)
+    model_output = result
     
     # ------------------------------------------------------------
     # Show ground truth

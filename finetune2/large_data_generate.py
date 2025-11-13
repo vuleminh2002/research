@@ -2,11 +2,11 @@ import json, random
 from tqdm import tqdm
 
 INPUT_FILE = "businesses.jsonl"
-OUTPUT_FILE = "geocode_train_randomized5.jsonl"
-NUM_SAMPLES = 1
-CANDIDATE_RANGE = (25, 30)
-MAX_ATTEMPTS = 20
-INSIDE_TARGET_RANGE = (0, 20)  # random target number of inside points per example
+OUTPUT_FILE = "geocode_train_two_samples.jsonl"
+NUM_SAMPLES = 2
+CANDIDATE_COUNT = 50
+MIN_INSIDE = 10
+MAX_ATTEMPTS = 50
 
 print("📦 Loading businesses...")
 with open(INPUT_FILE) as f:
@@ -16,10 +16,8 @@ print(f"✅ Loaded {len(all_points):,} businesses.\n")
 
 def make_rectangle_around(anchor, lat_scale, lon_scale):
     lat_center, lon_center = anchor["lat"], anchor["lon"]
-    lat_range = lat_scale
-    lon_range = lon_scale
-    lat1, lat2 = lat_center - lat_range / 2, lat_center + lat_range / 2
-    lon1, lon2 = lon_center - lon_range / 2, lon_center + lon_range / 2
+    lat1, lat2 = lat_center - lat_scale / 2, lat_center + lat_scale / 2
+    lon1, lon2 = lon_center - lon_scale / 2, lon_center + lon_scale / 2
     return {
         "top_left": {"lat": round(max(lat1, lat2), 4), "lon": round(min(lon1, lon2), 4)},
         "bottom_right": {"lat": round(min(lat1, lat2), 4), "lon": round(max(lon1, lon2), 4)},
@@ -31,11 +29,10 @@ def label_point(point, rect):
     tl, br = rect["top_left"], rect["bottom_right"]
     inside_lat = br["lat"] <= lat <= tl["lat"]
     inside_lon = tl["lon"] <= lon <= br["lon"]
-    inside = inside_lat and inside_lon
-    return inside, inside_lat, inside_lon
+    return inside_lat and inside_lon, inside_lat, inside_lon
 
 
-def nearby_candidates(anchor, radius_deg=1.0, max_candidates=2000):
+def nearby_candidates(anchor, radius_deg=1.0, max_candidates=3000):
     lat_c, lon_c = anchor["lat"], anchor["lon"]
     return [
         p for p in all_points
@@ -44,21 +41,19 @@ def nearby_candidates(anchor, radius_deg=1.0, max_candidates=2000):
 
 
 def generate_example():
-    target_inside = random.randint(*INSIDE_TARGET_RANGE)
     for _ in range(MAX_ATTEMPTS):
         anchor = random.choice(all_points)
         local_pool = nearby_candidates(anchor)
-        if len(local_pool) < 25:
+        if len(local_pool) < 60:
             continue
 
         lat_scale = lon_scale = random.uniform(0.02, 0.2)
-        for _ in range(6):
+        for _ in range(10):
             rect = make_rectangle_around(anchor, lat_scale, lon_scale)
-            sample = random.sample(local_pool, random.randint(*CANDIDATE_RANGE))
+            sample = random.sample(local_pool, CANDIDATE_COUNT)
 
             inside_ids, outside_ids, reasoning_lines = [], [], []
 
-            # Precompute bounds
             lat_lo = rect['bottom_right']['lat']
             lat_hi = rect['top_left']['lat']
             lon_lo = rect['top_left']['lon']
@@ -73,12 +68,9 @@ def generate_example():
                 reasoning_line = f"{idx}. {p['id']} → {lat_phrase}; {lon_phrase} → {decision_phrase}"
                 reasoning_lines.append(reasoning_line)
 
-                if inside:
-                    inside_ids.append(p["id"])
-                else:
-                    outside_ids.append(p["id"])
+                (inside_ids if inside else outside_ids).append(p["id"])
 
-            if abs(len(inside_ids) - target_inside) <= 1:
+            if len(inside_ids) >= MIN_INSIDE:
                 return {
                     "instruction": (
                         "Classify each candidate business as inside or outside the given rectangular range "
@@ -100,17 +92,22 @@ def generate_example():
                     ),
                 }
 
-            lat_scale *= 1.5
-            lon_scale *= 1.5
+            # Expand rectangle gradually to include more inside points
+            lat_scale *= 1.3
+            lon_scale *= 1.3
 
     return None
 
 
-print("🚀 Generating dataset with improved reasoning format...")
+print("🚀 Generating 2 examples with ≥10 inside points each...")
 with open(OUTPUT_FILE, "w") as f:
-    for _ in tqdm(range(NUM_SAMPLES)):
+    count = 0
+    for _ in tqdm(range(100)):  # try multiple times until 2 successful examples
         ex = generate_example()
         if ex:
             f.write(json.dumps(ex) + "\n")
+            count += 1
+            if count == NUM_SAMPLES:
+                break
 
-print(f"\n✅ Done! Saved dataset to {OUTPUT_FILE}")
+print(f"\n✅ Done! Created {count} samples and saved to {OUTPUT_FILE}")
