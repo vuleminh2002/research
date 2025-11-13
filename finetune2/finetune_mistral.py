@@ -162,7 +162,7 @@ training_args = TrainingArguments(
 
     # Logging / saving / evaluation — MUST MATCH
     logging_steps=20,
-    evaluation_strategy="steps",     # <--- REQUIRED
+    eval_strategy="steps",     # <--- REQUIRED
     eval_steps=200,
     save_strategy="steps",           # <--- MUST MATCH evaluation_strategy
     save_steps=200,
