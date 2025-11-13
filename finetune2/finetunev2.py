@@ -17,7 +17,7 @@ from peft import LoraConfig, get_peft_model
 # ============================================================
 # 1. LOAD DATASET
 # ============================================================
-dataset = load_dataset("json", data_files={"train": "geocode_train_randomized.jsonl"})
+dataset = load_dataset("json", data_files={"train": "geocode_train_vary.jsonl"})
 split = dataset["train"].train_test_split(test_size=0.1, seed=42)
 train_ds, val_ds = split["train"], split["test"]
 
