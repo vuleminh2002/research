@@ -148,24 +148,37 @@ data_collator = DataCollatorForSeq2Seq(
 # ============================================================
 training_args = TrainingArguments(
     output_dir="mistral-geocode-lora",
+
+    # Batch size
     per_device_train_batch_size=2,
     per_device_eval_batch_size=2,
-    gradient_accumulation_steps=8,   # Effective batch=16
+    gradient_accumulation_steps=8,   # Effective batch size = 16
+
+    # Training schedule
     num_train_epochs=2,
     learning_rate=2e-4,
     warmup_ratio=0.03,
     lr_scheduler_type="cosine",
+
+    # Logging / saving / evaluation — MUST MATCH
     logging_steps=20,
-    save_steps=200,
+    evaluation_strategy="steps",     # <--- REQUIRED
     eval_steps=200,
+    save_strategy="steps",           # <--- MUST MATCH evaluation_strategy
+    save_steps=200,
     save_total_limit=3,
-    bf16=True,                      # BEST on A100
-    report_to="none",
+
+    # Hardware optimization for A100
+    bf16=True,                       # A100 supports bfloat16
     optim="adamw_torch_fused",
     gradient_checkpointing=True,
+
+    # For using best checkpoint
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
     greater_is_better=False,
+
+    report_to="none",
 )
 
 model.enable_input_require_grads()
