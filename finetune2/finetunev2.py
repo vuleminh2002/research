@@ -144,6 +144,7 @@ training_args = TrainingArguments(
     greater_is_better=False,
     dataloader_num_workers=0,  # important for Windows
     max_grad_norm=1.0,
+    prediction_loss_only=True,
 )
 
 # ============================================================
