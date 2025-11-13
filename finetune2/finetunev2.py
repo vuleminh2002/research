@@ -22,32 +22,38 @@ split = dataset["train"].train_test_split(test_size=0.1, seed=42)
 train_ds, val_ds = split["train"], split["test"]
 
 # ============================================================
-# 2. LOAD TOKENIZER + ADD <END>
+# 2. LOAD TOKENIZER FIRST — ADD <END> BEFORE MODEL LOAD
 # ============================================================
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-tokenizer.add_special_tokens({"additional_special_tokens": ["<END>"]})
+# Add <END> BEFORE loading model ⇨ prevents vocab mismatch
+SPECIAL_TOKENS = {"additional_special_tokens": ["<END>"]}
+tokenizer.add_special_tokens(SPECIAL_TOKENS)
+
 END_ID = tokenizer.convert_tokens_to_ids("<END>")
-tokenizer.pad_token = tokenizer.eos_token
+tokenizer.pad_token = tokenizer.eos_token  # required for batching
+
+# Save tokenizer so model loads the correct vocab size
+tokenizer.save_pretrained("tinyllama-geocode-lora")
 
 # ============================================================
-# 3. LOAD MODEL + QLoRA 8-bit
+# 3. LOAD MODEL — AFTER TOKENIZER IS FINALIZED
 # ============================================================
 bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
+    BASE_MODEL,
     quantization_config=bnb_config,
-    device_map="auto"
+    device_map="auto",
 )
 
-# Resize embeddings for <END>
+# Resize embeddings NOW (before LoRA)
 model.resize_token_embeddings(len(tokenizer))
 
 # ============================================================
-# 4. APPLY LoRA
+# 4. APPLY QLoRA
 # ============================================================
 lora_config = LoraConfig(
     r=32,
@@ -62,63 +68,60 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 # ============================================================
-# 5. TOKENIZATION & LABEL MASKING
+# 5. TOKENIZATION WITH RESPONSE-ONLY LABELING
 # ============================================================
 def tokenize_example(example):
     instruction = example["instruction"].strip()
     inp = example["input"].strip()
-    out = example["output"].strip()  # now contains only reasoning + inside_ids
+    out = example["output"].strip()
 
-    # FULL PROMPT (Chat-style format)
+    # Chat-like prompt
     full_prompt = (
         f"### Instruction:\n{instruction}\n\n"
         f"### Input:\n{inp}\n\n"
         f"### Response:\n{out}\n<END>"
     )
 
-    # Tokenize whole prompt → input_ids + pad
     full_tok = tokenizer(
         full_prompt,
         truncation=True,
         max_length=2048,
-        padding="max_length"
+        padding="max_length",
     )
 
-    # Tokens of response ONLY
+    # Response only
     resp_text = f"{out}\n<END>"
     resp_ids = tokenizer(resp_text, add_special_tokens=False)["input_ids"]
 
     ids = full_tok["input_ids"]
 
-    # Locate response start index in full prompt
-    def find_subseq(full, sub):
+    # Locate where response begins
+    def find_subseq(main, sub):
         L = len(sub)
-        for i in range(len(full) - L + 1):
-            if full[i:i+L] == sub:
+        for i in range(len(main) - L + 1):
+            if main[i:i+L] == sub:
                 return i
         return -1
 
-    start = find_subseq(ids, resp_ids)
-    if start == -1:
-        # Rare fallback: assume response at end
-        start = len(ids) - len(resp_ids)
+    start_idx = find_subseq(ids, resp_ids)
+    if start_idx == -1:
+        start_idx = len(ids) - len(resp_ids)  # safety fallback
 
-    # MASK LABELS → Only response tokens are learned
     labels = []
     for i, t in enumerate(ids):
-        if i < start:  
-            labels.append(-100)         # mask instruction + input
+        if i < start_idx:
+            labels.append(-100)  # ignore instruction + input
         elif t == tokenizer.pad_token_id:
-            labels.append(-100)         # mask padding
+            labels.append(-100)
         else:
-            labels.append(t)            # learn response
+            labels.append(t)
 
     full_tok["labels"] = labels
     return full_tok
 
 
-tokenized_train = train_ds.map(tokenize_example, remove_columns=train_ds.column_names)
-tokenized_val = val_ds.map(tokenize_example, remove_columns=val_ds.column_names)
+train_tok = train_ds.map(tokenize_example, remove_columns=train_ds.column_names)
+val_tok = val_ds.map(tokenize_example, remove_columns=val_ds.column_names)
 
 data_collator = default_data_collator
 
@@ -126,10 +129,10 @@ data_collator = default_data_collator
 # 6. TRAINING ARGUMENTS
 # ============================================================
 training_args = TrainingArguments(
-    output_dir="tinyllama-geocode-lora",
-    per_device_train_batch_size=8,
-    gradient_accumulation_steps=2,
-    num_train_epochs=2,
+    output_dir="tinyllama-geocode-lora_v3",
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,
+    num_train_epochs=3,
     learning_rate=3e-4,
     warmup_ratio=0.03,
     lr_scheduler_type="constant",
@@ -140,10 +143,9 @@ training_args = TrainingArguments(
     eval_strategy="steps",
     eval_steps=200,
     save_steps=400,
+    save_total_limit=2,
 
-    save_total_limit=3,
     report_to="none",
-
     optim="adamw_torch_fused",
 
     load_best_model_at_end=True,
@@ -158,22 +160,19 @@ training_args = TrainingArguments(
 # ============================================================
 model.enable_input_require_grads()
 model.gradient_checkpointing_enable()
-model.config.use_cache = False  # required for checkpointing
-
-def compute_metrics(_): return {}
+model.config.use_cache = False
 
 trainer = Trainer(
     model=model,
     args=training_args,
-    train_dataset=tokenized_train,
-    eval_dataset=tokenized_val,
+    train_dataset=train_tok,
+    eval_dataset=val_tok,
     data_collator=data_collator,
     callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
-    compute_metrics=compute_metrics,
 )
 
 # ============================================================
-# 8. CUSTOM LOGGING LOOP
+# 8. TRAIN WITH CUSTOM LOGGING
 # ============================================================
 log_path = "training_log.csv"
 with open(log_path, "w", newline="") as f:
@@ -193,7 +192,7 @@ with open(log_path, "w", newline="") as f:
         f.flush()
 
 # ============================================================
-# 9. SAVE MODEL
+# 9. SAVE MODEL + TOKENIZER
 # ============================================================
 trainer.save_model("tinyllama-geocode-lora")
 tokenizer.save_pretrained("tinyllama-geocode-lora")
