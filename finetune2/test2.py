@@ -1,7 +1,6 @@
 import json
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -14,31 +13,22 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # -------------------------------------------------------------
 print("🧠 Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
-tokenizer.padding_side = "left"
 tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "left"
 
 # -------------------------------------------------------------
-# 2. Load model
+# 2. Load merged model (NOT LoRA)
 # -------------------------------------------------------------
-print("🧠 Loading base model...")
-base = AutoModelForCausalLM.from_pretrained(
+print("🧠 Loading merged student model...")
+model = AutoModelForCausalLM.from_pretrained(
     MODEL_DIR,
     torch_dtype=torch.float16,
     device_map="auto"
 )
-
-# If LoRA adapter exists, load it
-try:
-    print("🔧 Loading LoRA adapter...")
-    model = PeftModel.from_pretrained(base, MODEL_DIR)
-except:
-    print("⚠ No LoRA adapter found — using full model.")
-    model = base
-
 model.eval()
 
 # -------------------------------------------------------------
-# 3. Load FIRST 4 samples from the training dataset
+# 3. Load first 4 training samples
 # -------------------------------------------------------------
 print("📄 Loading training examples...")
 examples = []
@@ -49,7 +39,7 @@ with open(DATA_FILE, "r") as f:
 print(f"Loaded {len(examples)} examples.\n")
 
 # -------------------------------------------------------------
-# 4. Format prompt EXACTLY like training
+# 4. Build prompt exactly like training
 # -------------------------------------------------------------
 def build_prompt(example):
     instruction = example["instruction"].strip()
@@ -64,29 +54,27 @@ def build_prompt(example):
     return prompt
 
 # -------------------------------------------------------------
-# 5. Run inference on all 4 training examples
+# 5. Run inference
 # -------------------------------------------------------------
 for idx, ex in enumerate(examples):
     print("=" * 80)
-    print(f"🧪 TEST SAMPLE #{idx + 1}")
+    print(f"🧪 TEST SAMPLE #{idx+1}")
     print("=" * 80)
 
     prompt = build_prompt(ex)
+
     print("\n🔍 PROMPT SENT TO MODEL:\n")
     print(prompt)
-    print("\n" + "-" * 80)
+    print("-" * 80)
 
     inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
-    print(f"🔢 Prompt token length = {inputs['input_ids'].shape[1]}")
+    print(f"🔢 Prompt tokens: {inputs['input_ids'].shape[1]}")
 
-    # -------------------------------
-    # Generate
-    # -------------------------------
     with torch.no_grad():
         output = model.generate(
             **inputs,
             max_new_tokens=512,
-            temperature=0.0,       # deterministic for debugging
+            temperature=0.0,
             do_sample=False
         )
 
@@ -95,20 +83,17 @@ for idx, ex in enumerate(examples):
 
     print("\n📝 RAW MODEL OUTPUT:\n")
     print(response)
-    print("\n" + "-" * 80)
+    print("-" * 80)
 
-    # ----------------------------------------------------------
     # Extract inside_ids
-    # ----------------------------------------------------------
-    extracted = []
-
+    inside = []
     for line in response.split("\n"):
         if line.lower().startswith("inside_ids"):
             try:
                 arr = line.split(":", 1)[1].strip()
-                extracted = json.loads(arr.replace("'", '"'))
+                inside = json.loads(arr.replace("'", '"'))
             except:
-                extracted = []
+                inside = []
             break
 
-    print(f"👉 Parsed inside_ids: {extracted}\n")
+    print(f"👉 Parsed inside_ids: {inside}\n")
