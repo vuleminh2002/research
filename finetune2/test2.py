@@ -1,124 +1,114 @@
+import json
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
-import json
-import sys
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
-BASE = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 MODEL_DIR = "tinyllama-geocode-lora_v3"
+DATA_FILE = "geocode_train_vary.jsonl"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# -------------------------------------------------------------
+# 1. Load tokenizer
+# -------------------------------------------------------------
 print("🧠 Loading tokenizer...")
-try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    print("✅ Loaded tokenizer from LoRA directory.")
-except Exception as e:
-    print("❌ Failed to load tokenizer from LoRA directory.")
-    print("⚠ Falling back to base tokenizer (NOT recommended)")
-    tokenizer = AutoTokenizer.from_pretrained(BASE)
-
-# Ensure END token exists
-if "<END>" not in tokenizer.get_vocab():
-    print("⚠ WARNING: <END> token missing — adding it.")
-    tokenizer.add_special_tokens({"additional_special_tokens": ["<END>"]})
-
-END_ID = tokenizer.convert_tokens_to_ids("<END>")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+tokenizer.padding_side = "left"
 tokenizer.pad_token = tokenizer.eos_token
 
-print("\n🧠 Loading base model...")
+# -------------------------------------------------------------
+# 2. Load model
+# -------------------------------------------------------------
+print("🧠 Loading base model...")
 base = AutoModelForCausalLM.from_pretrained(
-    BASE,
+    MODEL_DIR,
     torch_dtype=torch.float16,
     device_map="auto"
 )
 
-# Resize embeddings BEFORE loading LoRA
-base.resize_token_embeddings(len(tokenizer))
+# If LoRA adapter exists, load it
+try:
+    print("🔧 Loading LoRA adapter...")
+    model = PeftModel.from_pretrained(base, MODEL_DIR)
+except:
+    print("⚠ No LoRA adapter found — using full model.")
+    model = base
 
-print("🧠 Loading LoRA adapter...")
-model = PeftModel.from_pretrained(
-    base,
-    MODEL_DIR,
-)
-
-model = model.to(DEVICE)
 model.eval()
 
+# -------------------------------------------------------------
+# 3. Load FIRST 4 samples from the training dataset
+# -------------------------------------------------------------
+print("📄 Loading training examples...")
+examples = []
+with open(DATA_FILE, "r") as f:
+    for _ in range(4):
+        examples.append(json.loads(next(f)))
 
-# ============================================================
-#  GENERATION FUNCTION (stops at <END>)
-# ============================================================
-def generate_response(instruction, input_text, max_new_tokens=512):
+print(f"Loaded {len(examples)} examples.\n")
+
+# -------------------------------------------------------------
+# 4. Format prompt EXACTLY like training
+# -------------------------------------------------------------
+def build_prompt(example):
+    instruction = example["instruction"].strip()
+    inp = example["input"].strip()
+
     prompt = (
+        f"{tokenizer.bos_token}"
         f"### Instruction:\n{instruction}\n\n"
-        f"### Input:\n{input_text}\n\n"
+        f"### Input:\n{inp}\n\n"
         f"### Response:\n"
     )
+    return prompt
 
-    print("\n🔍 Full prompt provided to the model:\n" + prompt)
+# -------------------------------------------------------------
+# 5. Run inference on all 4 training examples
+# -------------------------------------------------------------
+for idx, ex in enumerate(examples):
+    print("=" * 80)
+    print(f"🧪 TEST SAMPLE #{idx + 1}")
+    print("=" * 80)
 
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt"
-    ).to(DEVICE)
+    prompt = build_prompt(ex)
+    print("\n🔍 PROMPT SENT TO MODEL:\n")
+    print(prompt)
+    print("\n" + "-" * 80)
 
+    inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+    print(f"🔢 Prompt token length = {inputs['input_ids'].shape[1]}")
+
+    # -------------------------------
+    # Generate
+    # -------------------------------
     with torch.no_grad():
         output = model.generate(
             **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=0.0,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=END_ID     # STOP when model outputs <END>
+            max_new_tokens=512,
+            temperature=0.0,       # deterministic for debugging
+            do_sample=False
         )
 
-    decoded = tokenizer.decode(output[0], skip_special_tokens=False)
+    decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+    response = decoded.replace(prompt, "").strip()
 
-    # Cut at <END>
-    if "<END>" in decoded:
-        decoded = decoded.split("<END>")[0]
+    print("\n📝 RAW MODEL OUTPUT:\n")
+    print(response)
+    print("\n" + "-" * 80)
 
-    # Remove everything before ### Response:
-    if "### Response:" in decoded:
-        decoded = decoded.split("### Response:")[1].strip()
+    # ----------------------------------------------------------
+    # Extract inside_ids
+    # ----------------------------------------------------------
+    extracted = []
 
-    print("\n📝 Raw model response:\n", decoded)
-    return decoded
+    for line in response.split("\n"):
+        if line.lower().startswith("inside_ids"):
+            try:
+                arr = line.split(":", 1)[1].strip()
+                extracted = json.loads(arr.replace("'", '"'))
+            except:
+                extracted = []
+            break
 
-
-# ============================================================
-#  TESTING WITH ONE SAMPLE
-# ============================================================
-# Load a sample from your dataset
-sample = None
-try:
-    with open("sample_input.json", "r") as f:
-        sample = json.load(f)
-except:
-    print("\n⚠ No sample_input.json found. Using a hardcoded test case.\n")
-    sample = {
-        "instruction": "Classify each candidate business as inside or outside the given rectangular range based on its latitude and longitude. Output reasoning for each candidate, then list inside_ids.",
-        "input": """Rectangle:
-  top_left: (40.1430, -86.3922)
-  bottom_right: (39.4482, -85.6975)
-Candidates:
-  j2T-O-fk5E4BjcoUC1tRIA: (39.6213, -86.1590)
-  MfK5DeKjnneIDZTUkUKP8g: (39.9782, -86.1286)
-  sDP2_XUcyN9W2cSV8OCp9g: (39.8330, -86.2456)
-  1Tku3PDAmSOoJeR80tuZqA: (39.9229, -86.2306)
-  fr5URHkQU59sdka9ShjHJw: (39.9184, -86.2248)
-  fci-hYpdFDMKgLLqRXobUw: (39.9276, -86.0937)
-  pk7E-3G7Ij39h9HifNz0TA: (39.8535, -85.9926)
-  cM-mwZrOPbeXRQqrXDU1_Q: (39.9520, -86.0409)
-  rZVznzcoBnX2DOYwPdE5NA: (39.8639, -86.3985)
-  oT5Bidkfa7cGOp1806ryXQ: (39.9137, -86.1391)
-  LMahsH7Iy9d3MT3ez_CmCQ: (39.6132, -86.0835)
-  fqKPLGsHisaCtNHFVyvUzg: (39.6101, -86.3736)
-"""
-    }
-
-instruction = sample["instruction"]
-input_text = sample["input"]
-
-response = generate_response(instruction, input_text)
-print("\n👉 Final Extracted Response:\n", response)
+    print(f"👉 Parsed inside_ids: {extracted}\n")
