@@ -43,7 +43,7 @@ model.eval()
 # -----------------------------
 # Inference function
 # -----------------------------
-def generate_response(instruction, input_text, max_new_tokens=512):
+def generate_response(instruction, input_text, max_new_tokens=1024):
     prompt = (
         f"### Instruction:\n{instruction}\n\n"
         f"### Input:\n{input_text}\n\n"
