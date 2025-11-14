@@ -25,6 +25,7 @@ train_ds, val_ds = split["train"], split["test"]
 # 2. LOAD TOKENIZER FIRST — ADD <END> BEFORE MODEL LOAD
 # ============================================================
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+STUDENT_MODEL_DIR = "tinyllama-geocode-lora_v3"   # <<<<<<<< UPDATED HERE
 
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
@@ -35,8 +36,8 @@ tokenizer.add_special_tokens(SPECIAL_TOKENS)
 END_ID = tokenizer.convert_tokens_to_ids("<END>")
 tokenizer.pad_token = tokenizer.eos_token  # required for batching
 
-# Save tokenizer so model loads the correct vocab size
-tokenizer.save_pretrained("tinyllama-geocode-lora")
+# Save tokenizer into v3 folder
+tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
 # ============================================================
 # 3. LOAD MODEL — AFTER TOKENIZER IS FINALIZED
@@ -75,7 +76,6 @@ def tokenize_example(example):
     inp = example["input"].strip()
     out = example["output"].strip()
 
-    # Chat-like prompt
     full_prompt = (
         f"### Instruction:\n{instruction}\n\n"
         f"### Input:\n{inp}\n\n"
@@ -89,13 +89,11 @@ def tokenize_example(example):
         padding="max_length",
     )
 
-    # Response only
     resp_text = f"{out}\n<END>"
     resp_ids = tokenizer(resp_text, add_special_tokens=False)["input_ids"]
 
     ids = full_tok["input_ids"]
 
-    # Locate where response begins
     def find_subseq(main, sub):
         L = len(sub)
         for i in range(len(main) - L + 1):
@@ -105,13 +103,11 @@ def tokenize_example(example):
 
     start_idx = find_subseq(ids, resp_ids)
     if start_idx == -1:
-        start_idx = len(ids) - len(resp_ids)  # safety fallback
+        start_idx = len(ids) - len(resp_ids)  # fallback
 
     labels = []
     for i, t in enumerate(ids):
-        if i < start_idx:
-            labels.append(-100)  # ignore instruction + input
-        elif t == tokenizer.pad_token_id:
+        if i < start_idx or t == tokenizer.pad_token_id:
             labels.append(-100)
         else:
             labels.append(t)
@@ -126,10 +122,10 @@ val_tok = val_ds.map(tokenize_example, remove_columns=val_ds.column_names)
 data_collator = default_data_collator
 
 # ============================================================
-# 6. TRAINING ARGUMENTS
+# 6. TRAINING ARGUMENTS — UPDATED FOR v3 MODEL DIR
 # ============================================================
 training_args = TrainingArguments(
-    output_dir="tinyllama-geocode-lora_v3",
+    output_dir=STUDENT_MODEL_DIR,        # <<<<<<<< UPDATED
     per_device_train_batch_size=4,
     gradient_accumulation_steps=4,
     num_train_epochs=3,
@@ -172,9 +168,9 @@ trainer = Trainer(
 )
 
 # ============================================================
-# 8. TRAIN WITH CUSTOM LOGGING
+# 8. CUSTOM TRAINING LOOP WITH LOGGING
 # ============================================================
-log_path = "training_log.csv"
+log_path = f"{STUDENT_MODEL_DIR}/training_log.csv"  # <<<<<<<< UPDATED
 with open(log_path, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(["epoch", "eval_loss", "perplexity"])
@@ -192,9 +188,9 @@ with open(log_path, "w", newline="") as f:
         f.flush()
 
 # ============================================================
-# 9. SAVE MODEL + TOKENIZER
+# 9. SAVE MODEL + TOKENIZER INTO v3
 # ============================================================
-trainer.save_model("tinyllama-geocode-lora")
-tokenizer.save_pretrained("tinyllama-geocode-lora")
+trainer.save_model(STUDENT_MODEL_DIR)
+tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
-print("\n✅ Training complete.")
+print("\n✅ Training complete. Saved to tinyllama-geocode-lora_v3.")
