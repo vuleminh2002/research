@@ -1,0 +1,21 @@
+### Instruction:
+Classify each candidate business as inside or outside the given rectangular range based on its latitude and longitude. Output reasoning for each candidate, then list final inside_ids.
+
+### Input:
+Rectangle:
+  top_left: (39.1437, -90.3587)
+  bottom_right: (38.5850, -89.8000)
+Candidates:
+  _PRReGRG73wT8edwsfWbuQ: (38.6067, -90.2589)
+  -e9MepGs8piOYdwuP5x7tw: (38.5991, -90.2239)
+  7k-piL173pqXADKb2lzk0A: (38.5999, -90.4469)
+  gkNFqSreKexZxC0BTqS4uw: (38.7779, -90.3344)
+  qKTjtjNSHNj8g2ugXlmkTA: (38.6381, -90.3426)
+  xYsK0TeSt4ovcXLCiR_nyA: (38.7428, -90.4076)
+  DszOO6k_s2wuGhTw2AsUdA: (38.6016, -89.9880)
+  qEBL7U0kW4lkptcd_4wWbg: (38.6380, -90.3386)
+  Cu4Aph95PGwAN1arOhqXTw: (38.4663, -90.3032)
+  _Xe-dBjtCD3rmC7tbk08dQ: (38.6440, -90.4065)
+  WXxZigTHz0ap8JXVCEEepA: (38.6262, -90.2363)
+
+### Response:
