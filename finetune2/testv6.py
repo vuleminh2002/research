@@ -9,17 +9,25 @@ MODEL_DIR = "tinyllama-geocode-lora_v6"
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 OUTPUT_FILE = "geocode_test_predictions.jsonl"
 
+print("=" * 60)
+print("🚀 GEOCODE MODEL INFERENCE")
+print("=" * 60)
 
 # -----------------------------
 # Load tokenizer
 # -----------------------------
+print("\n📚 Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
 END_ID = tokenizer.convert_tokens_to_ids("<END>")
 
+print(f"✅ Tokenizer loaded")
+print(f"   <END> token ID: {END_ID}")
+print(f"   Vocab size: {len(tokenizer)}")
 
 # -----------------------------
 # Load base model in 8-bit
 # -----------------------------
+print("\n🧠 Loading base model in 8-bit...")
 bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
 base_model = AutoModelForCausalLM.from_pretrained(
@@ -28,22 +36,37 @@ base_model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
-# CRITICAL FIX: Resize embeddings
+# CRITICAL: Resize embeddings to match tokenizer
 base_model.resize_token_embeddings(len(tokenizer))
-
+print(f"✅ Base model loaded and resized")
 
 # -----------------------------
-# Load LoRA adapter
+# Load LoRA adapter and merge
 # -----------------------------
+print("\n🔧 Loading LoRA adapter...")
 model = PeftModel.from_pretrained(base_model, MODEL_DIR)
+
+print("🔗 Merging LoRA weights...")
 model = model.merge_and_unload()
 model.eval()
-
+print("✅ Model ready for inference")
 
 # -----------------------------
 # Inference function
 # -----------------------------
-def generate_response(instruction, input_text, max_new_tokens=1024):
+def generate_response(instruction, input_text, max_new_tokens=1024, debug=False):
+    """
+    Generate model response for given instruction and input.
+    
+    Args:
+        instruction: Task instruction
+        input_text: Input data
+        max_new_tokens: Maximum tokens to generate
+        debug: If True, print debug information
+    
+    Returns:
+        Generated response text (without <END> token)
+    """
     prompt = (
         f"### Instruction:\n{instruction}\n\n"
         f"### Input:\n{input_text}\n\n"
@@ -51,6 +74,7 @@ def generate_response(instruction, input_text, max_new_tokens=1024):
     )
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    input_length = inputs.input_ids.shape[1]
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -59,61 +83,79 @@ def generate_response(instruction, input_text, max_new_tokens=1024):
             eos_token_id=END_ID,
             pad_token_id=END_ID,
             do_sample=False,
-            temperature=0.0,
-        )[0]
+        )
 
-    text = tokenizer.decode(output_ids, skip_special_tokens=False)
-
-    # Cut at <END>
+    # Extract only the generated tokens (not the input prompt)
+    generated_ids = output_ids[0][input_length:]
+    
+    if debug:
+        print(f"\n🔍 DEBUG INFO:")
+        print(f"   Input length: {input_length} tokens")
+        print(f"   Generated length: {len(generated_ids)} tokens")
+        print(f"   <END> token ({END_ID}) in generated: {END_ID in generated_ids.tolist()}")
+        print(f"   Last 10 token IDs: {generated_ids[-10:].tolist()}")
+    
+    # Decode the generated tokens
+    text = tokenizer.decode(generated_ids, skip_special_tokens=False)
+    
+    if debug:
+        print(f"   '<END>' in decoded text: {'<END>' in text}")
+        print(f"   Last 100 chars: ...{text[-100:]}")
+    
+    # Remove <END> token if present
     if "<END>" in text:
         text = text.split("<END>")[0]
-
-    # Extract only the model's response area
-    if "### Response:" in text:
-        text = text.split("### Response:")[1].strip()
-
-    return text
+    
+    return text.strip()
 
 
 # -----------------------------
-# Run inference and PRINT EVERYTHING
+# Run inference on test dataset
 # -----------------------------
-print("\n==============================")
-print("🔍 Running inference on test dataset...")
-print("==============================\n")
+print("\n" + "=" * 60)
+print("🔍 RUNNING INFERENCE ON TEST DATASET")
+print("=" * 60 + "\n")
 
 predictions = []
+total_examples = 0
 
+# Count total examples first
 with open(TEST_FILE) as f:
-    for line in tqdm(f, desc="Processing"):
+    total_examples = sum(1 for _ in f)
+
+print(f"📊 Found {total_examples} test examples\n")
+
+# Process each example
+with open(TEST_FILE) as f:
+    for idx, line in enumerate(tqdm(f, total=total_examples, desc="Processing"), 1):
         ex = json.loads(line)
 
         instruction = ex["instruction"]
         input_text = ex["input"]
-        # Optional: Ground truth output from the dataset
         true_output = ex.get("output", "").replace("<END>", "").strip()
 
-        predicted = generate_response(instruction, input_text)
+        # Generate prediction (debug=True for first example only)
+        predicted = generate_response(instruction, input_text, debug=(idx == 1))
 
-        # ------------- PRINT TO TERMINAL -------------
-        print("\n==============================================")
-        print("🟦 INPUT")
-        print("==============================================")
-        print(input_text)
-
-        print("\n==============================================")
-        print("🤖 MODEL OUTPUT")
-        print("==============================================")
+        # Print results
+        print("\n" + "=" * 60)
+        print(f"📝 EXAMPLE {idx}/{total_examples}")
+        print("=" * 60)
+        
+        print("\n🟦 INPUT:")
+        print("-" * 60)
+        print(input_text[:300] + "..." if len(input_text) > 300 else input_text)
+        
+        print("\n🤖 MODEL OUTPUT:")
+        print("-" * 60)
         print(predicted)
+        
+        print("\n🏷️  TRUE OUTPUT:")
+        print("-" * 60)
+        print(true_output[:300] + "..." if len(true_output) > 300 else true_output)
+        print()
 
-        print("\n==============================================")
-        print("🏷 TRUE OUTPUT")
-        print("==============================================")
-        print(true_output)
-
-        print("\n==============================================\n")
-
-        # Save into collector for JSONL output
+        # Collect prediction
         predictions.append({
             "instruction": instruction,
             "input": input_text,
@@ -122,10 +164,17 @@ with open(TEST_FILE) as f:
         })
 
 # -----------------------------
-# Save predictions file
+# Save predictions to file
 # -----------------------------
+print("\n" + "=" * 60)
+print("💾 SAVING PREDICTIONS")
+print("=" * 60)
+
 with open(OUTPUT_FILE, "w") as f:
     for p in predictions:
         f.write(json.dumps(p) + "\n")
 
-print(f"\n✅ DONE! Predictions written to: {OUTPUT_FILE}\n")
+print(f"\n✅ DONE!")
+print(f"📁 Predictions saved to: {OUTPUT_FILE}")
+print(f"📊 Total examples processed: {len(predictions)}")
+print("\n" + "=" * 60 + "\n")
