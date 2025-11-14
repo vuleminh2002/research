@@ -22,25 +22,26 @@ split = dataset["train"].train_test_split(test_size=0.1, seed=42)
 train_ds, val_ds = split["train"], split["test"]
 
 # ============================================================
-# 2. LOAD TOKENIZER FIRST — ADD <END> BEFORE MODEL LOAD
+# 2. TOKENIZER — ADD <END> + SET AS EOS + PAD
 # ============================================================
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-STUDENT_MODEL_DIR = "tinyllama-geocode-lora_v3"   # <<<<<<<< UPDATED HERE
+STUDENT_MODEL_DIR = "tinyllama-geocode-lora_v3"
 
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-# Add <END> BEFORE loading model ⇨ prevents vocab mismatch
-SPECIAL_TOKENS = {"additional_special_tokens": ["<END>"]}
-tokenizer.add_special_tokens(SPECIAL_TOKENS)
+# Add <END> token
+tokenizer.add_special_tokens({"additional_special_tokens": ["<END>"]})
+
+# Set <END> as the eos & pad token
+tokenizer.eos_token = "<END>"
+tokenizer.pad_token = "<END>"
 
 END_ID = tokenizer.convert_tokens_to_ids("<END>")
-tokenizer.pad_token = tokenizer.eos_token  # required for batching
 
-# Save tokenizer into v3 folder
 tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
 # ============================================================
-# 3. LOAD MODEL — AFTER TOKENIZER IS FINALIZED
+# 3. LOAD MODEL (AFTER TOKENIZER FINALIZED)
 # ============================================================
 bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
@@ -50,8 +51,10 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
-# Resize embeddings NOW (before LoRA)
 model.resize_token_embeddings(len(tokenizer))
+
+model.config.eos_token_id = END_ID
+model.config.pad_token_id = END_ID
 
 # ============================================================
 # 4. APPLY QLoRA
@@ -69,8 +72,18 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 # ============================================================
-# 5. TOKENIZATION WITH RESPONSE-ONLY LABELING
+# 5. TOKENIZATION WITH RESPONSE-ONLY LABEL MASKING
 # ============================================================
+
+RESPONSE_MARKER = "### Response:\n"
+response_marker_ids = tokenizer(RESPONSE_MARKER, add_special_tokens=False)["input_ids"]
+
+def find_subsequence(main, sub):
+    for i in range(len(main) - len(sub) + 1):
+        if main[i : i + len(sub)] == sub:
+            return i
+    return -1
+
 def tokenize_example(example):
     instruction = example["instruction"].strip()
     inp = example["input"].strip()
@@ -79,38 +92,28 @@ def tokenize_example(example):
     full_prompt = (
         f"### Instruction:\n{instruction}\n\n"
         f"### Input:\n{inp}\n\n"
-        f"### Response:\n{out}\n<END>"
+        f"{RESPONSE_MARKER}{out}"
     )
 
-    full_tok = tokenizer(
-        full_prompt,
-        truncation=True,
-        max_length=2048,
-        padding="max_length",
-    )
-
-    resp_text = f"{out}\n<END>"
-    resp_ids = tokenizer(resp_text, add_special_tokens=False)["input_ids"]
+    # Tokenize the entire prompt with truncation
+    full_tok = tokenizer(full_prompt, truncation=True, max_length=2048)
 
     ids = full_tok["input_ids"]
 
-    def find_subseq(main, sub):
-        L = len(sub)
-        for i in range(len(main) - L + 1):
-            if main[i:i+L] == sub:
-                return i
-        return -1
+    # Find where response begins (right after the marker)
+    marker_index = find_subsequence(ids, response_marker_ids)
+    if marker_index == -1:
+        resp_start = 0
+    else:
+        resp_start = marker_index + len(response_marker_ids)
 
-    start_idx = find_subseq(ids, resp_ids)
-    if start_idx == -1:
-        start_idx = len(ids) - len(resp_ids)  # fallback
-
+    # Mask labels before response start
     labels = []
-    for i, t in enumerate(ids):
-        if i < start_idx or t == tokenizer.pad_token_id:
+    for i, token in enumerate(ids):
+        if i < resp_start:
             labels.append(-100)
         else:
-            labels.append(t)
+            labels.append(token)
 
     full_tok["labels"] = labels
     return full_tok
@@ -122,21 +125,21 @@ val_tok = val_ds.map(tokenize_example, remove_columns=val_ds.column_names)
 data_collator = default_data_collator
 
 # ============================================================
-# 6. TRAINING ARGUMENTS — UPDATED FOR v3 MODEL DIR
+# 6. TRAINING ARGUMENTS
 # ============================================================
 training_args = TrainingArguments(
-    output_dir=STUDENT_MODEL_DIR,        # <<<<<<<< UPDATED
+    output_dir=STUDENT_MODEL_DIR,
     per_device_train_batch_size=4,
     gradient_accumulation_steps=4,
     num_train_epochs=3,
     learning_rate=3e-4,
     warmup_ratio=0.03,
-    lr_scheduler_type="constant",
+    lr_scheduler_type="cosine",
 
     fp16=True,
     logging_steps=25,
 
-    eval_strategy="steps",
+    evaluation_strategy="steps",
     eval_steps=200,
     save_steps=400,
     save_total_limit=2,
@@ -152,7 +155,7 @@ training_args = TrainingArguments(
 )
 
 # ============================================================
-# 7. TRAINER
+# 7. TRAINER SETUP
 # ============================================================
 model.enable_input_require_grads()
 model.gradient_checkpointing_enable()
@@ -168,29 +171,33 @@ trainer = Trainer(
 )
 
 # ============================================================
-# 8. CUSTOM TRAINING LOOP WITH LOGGING
+# 8. TRAIN ONCE — NO DUPLICATED LOOP
 # ============================================================
-log_path = f"{STUDENT_MODEL_DIR}/training_log.csv"  # <<<<<<<< UPDATED
+trainer.train()
+
+# Log eval results into CSV
+log_path = f"{STUDENT_MODEL_DIR}/training_log.csv"
 with open(log_path, "w", newline="") as f:
     writer = csv.writer(f)
-    writer.writerow(["epoch", "eval_loss", "perplexity"])
+    writer.writerow(["epoch", "eval_step", "eval_loss", "perplexity"])
 
-    for epoch in range(training_args.num_train_epochs):
-        print(f"\n🚀 Epoch {epoch+1}")
-        trainer.train()
+    for log in trainer.state.log_history:
+        if "eval_loss" in log:
+            loss = log["eval_loss"]
+            epoch = log.get("epoch", None)
+            step = log.get("step", None)
+            ppl = math.exp(loss) if loss < 20 else float("inf")
+            writer.writerow([epoch, step, loss, ppl])
 
-        metrics = trainer.evaluate()
-        loss = metrics["eval_loss"]
-        ppl = math.exp(loss) if loss < 20 else float("inf")
-
-        print(f"Eval Loss = {loss:.4f} | Perplexity = {ppl:.2f}")
-        writer.writerow([epoch+1, loss, ppl])
-        f.flush()
+metrics = trainer.evaluate()
+loss = metrics["eval_loss"]
+ppl = math.exp(loss) if loss < 20 else float("inf")
+print(f"\nFINAL EVAL — loss: {loss:.4f}, ppl: {ppl:.2f}")
 
 # ============================================================
-# 9. SAVE MODEL + TOKENIZER INTO v3
+# 9. SAVE MODEL (LoRA adapter)
 # ============================================================
 trainer.save_model(STUDENT_MODEL_DIR)
 tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
-print("\n✅ Training complete. Saved to tinyllama-geocode-lora_v3.")
+print("\n✅ TRAINING COMPLETE — Saved to tinyllama-geocode-lora_v3")
