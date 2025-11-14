@@ -28,23 +28,20 @@ base_model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
-# CRITICAL FIX: Resize base model to match tokenizer + LoRA vocab
+# CRITICAL FIX: Resize embeddings
 base_model.resize_token_embeddings(len(tokenizer))
 
 
 # -----------------------------
-# Load LoRA adapter into base model
+# Load LoRA adapter
 # -----------------------------
 model = PeftModel.from_pretrained(base_model, MODEL_DIR)
-
-# Optional: Merge LoRA into the base model for faster inference
 model = model.merge_and_unload()
-
 model.eval()
 
 
 # -----------------------------
-# Helper: Generate output for one example
+# Inference function
 # -----------------------------
 def generate_response(instruction, input_text, max_new_tokens=512):
     prompt = (
@@ -59,19 +56,19 @@ def generate_response(instruction, input_text, max_new_tokens=512):
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            eos_token_id=END_ID,   # STOP at <END>
+            eos_token_id=END_ID,
             pad_token_id=END_ID,
-            do_sample=False,       # deterministic
+            do_sample=False,
             temperature=0.0,
         )[0]
 
     text = tokenizer.decode(output_ids, skip_special_tokens=False)
 
-    # Cut off at <END>
+    # Cut at <END>
     if "<END>" in text:
         text = text.split("<END>")[0]
 
-    # Keep only content after "### Response:"
+    # Extract only the model's response area
     if "### Response:" in text:
         text = text.split("### Response:")[1].strip()
 
@@ -79,9 +76,11 @@ def generate_response(instruction, input_text, max_new_tokens=512):
 
 
 # -----------------------------
-# Run inference on the test dataset
+# Run inference and PRINT EVERYTHING
 # -----------------------------
-print("🔍 Running inference on test data...")
+print("\n==============================")
+print("🔍 Running inference on test dataset...")
+print("==============================\n")
 
 predictions = []
 
@@ -91,20 +90,42 @@ with open(TEST_FILE) as f:
 
         instruction = ex["instruction"]
         input_text = ex["input"]
+        # Optional: Ground truth output from the dataset
+        true_output = ex.get("output", "").replace("<END>", "").strip()
 
         predicted = generate_response(instruction, input_text)
 
+        # ------------- PRINT TO TERMINAL -------------
+        print("\n==============================================")
+        print("🟦 INPUT")
+        print("==============================================")
+        print(input_text)
+
+        print("\n==============================================")
+        print("🤖 MODEL OUTPUT")
+        print("==============================================")
+        print(predicted)
+
+        print("\n==============================================")
+        print("🏷 TRUE OUTPUT")
+        print("==============================================")
+        print(true_output)
+
+        print("\n==============================================\n")
+
+        # Save into collector for JSONL output
         predictions.append({
             "instruction": instruction,
             "input": input_text,
-            "predicted_output": predicted
+            "predicted_output": predicted,
+            "true_output": true_output
         })
 
 # -----------------------------
-# Save predictions
+# Save predictions file
 # -----------------------------
 with open(OUTPUT_FILE, "w") as f:
     for p in predictions:
         f.write(json.dumps(p) + "\n")
 
-print(f"\n✅ DONE! Predictions saved to: {OUTPUT_FILE}")
+print(f"\n✅ DONE! Predictions written to: {OUTPUT_FILE}\n")
