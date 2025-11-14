@@ -10,7 +10,7 @@ from transformers import (
     Trainer,
     EarlyStoppingCallback,
     BitsAndBytesConfig,
-    default_data_collator,
+    DataCollatorWithPadding,
 )
 from peft import LoraConfig, get_peft_model
 
@@ -22,26 +22,26 @@ split = dataset["train"].train_test_split(test_size=0.1, seed=42)
 train_ds, val_ds = split["train"], split["test"]
 
 # ============================================================
-# 2. TOKENIZER — ADD <END> + SET AS EOS + PAD
+# 2. TOKENIZER — ADD <END> AND MAKE IT EOS + PAD
 # ============================================================
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-STUDENT_MODEL_DIR = "tinyllama-geocode-lora_v3"
+STUDENT_MODEL_DIR = "tinyllama-geocode-lora_v5"
 
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-# Add <END> token
+# Add <END> if not present
 tokenizer.add_special_tokens({"additional_special_tokens": ["<END>"]})
 
-# Set <END> as the eos & pad token
+# Configure as EOS + PAD
 tokenizer.eos_token = "<END>"
 tokenizer.pad_token = "<END>"
-
 END_ID = tokenizer.convert_tokens_to_ids("<END>")
 
+# Save tokenizer
 tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
 # ============================================================
-# 3. LOAD MODEL (AFTER TOKENIZER FINALIZED)
+# 3. LOAD MODEL (AFTER TOKENIZER IS FINAL)
 # ============================================================
 bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
@@ -51,13 +51,14 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
+# Resize embeddings for new special token(s)
 model.resize_token_embeddings(len(tokenizer))
 
 model.config.eos_token_id = END_ID
 model.config.pad_token_id = END_ID
 
 # ============================================================
-# 4. APPLY QLoRA
+# 4. APPLY QLoRA PARAMETERS
 # ============================================================
 lora_config = LoraConfig(
     r=32,
@@ -72,7 +73,7 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 # ============================================================
-# 5. TOKENIZATION WITH RESPONSE-ONLY LABEL MASKING
+# 5. TOKENIZATION WITH RESPONSE-ONLY MASKING
 # ============================================================
 
 RESPONSE_MARKER = "### Response:\n"
@@ -80,7 +81,7 @@ response_marker_ids = tokenizer(RESPONSE_MARKER, add_special_tokens=False)["inpu
 
 def find_subsequence(main, sub):
     for i in range(len(main) - len(sub) + 1):
-        if main[i : i + len(sub)] == sub:
+        if main[i:i+len(sub)] == sub:
             return i
     return -1
 
@@ -89,40 +90,49 @@ def tokenize_example(example):
     inp = example["input"].strip()
     out = example["output"].strip()
 
+    # Create full prompt
     full_prompt = (
         f"### Instruction:\n{instruction}\n\n"
         f"### Input:\n{inp}\n\n"
         f"{RESPONSE_MARKER}{out}"
     )
 
-    # Tokenize the entire prompt with truncation
-    full_tok = tokenizer(full_prompt, truncation=True, max_length=2048)
+    # Tokenize without padding (padding happens later with collator)
+    full_tok = tokenizer(
+        full_prompt,
+        truncation=True,
+        max_length=2048,
+    )
 
     ids = full_tok["input_ids"]
 
-    # Find where response begins (right after the marker)
+    # Find response start
     marker_index = find_subsequence(ids, response_marker_ids)
     if marker_index == -1:
         resp_start = 0
     else:
         resp_start = marker_index + len(response_marker_ids)
 
-    # Mask labels before response start
+    # Mask labels before the response begins
     labels = []
-    for i, token in enumerate(ids):
+    for i, tok in enumerate(ids):
         if i < resp_start:
-            labels.append(-100)
+            labels.append(-100)  # ignore input/inst
         else:
-            labels.append(token)
+            labels.append(tok)  # learn only output
 
     full_tok["labels"] = labels
     return full_tok
 
 
 train_tok = train_ds.map(tokenize_example, remove_columns=train_ds.column_names)
-val_tok = val_ds.map(tokenize_example, remove_columns=val_ds.column_names)
+val_tok = val_ds.map(tokenize_example, remove_columns=train_ds.column_names)
 
-data_collator = default_data_collator
+# Dynamic padding collator (required!)
+data_collator = DataCollatorWithPadding(
+    tokenizer=tokenizer,
+    pad_to_multiple_of=8,  # improves GPU performance
+)
 
 # ============================================================
 # 6. TRAINING ARGUMENTS
@@ -139,7 +149,7 @@ training_args = TrainingArguments(
     fp16=True,
     logging_steps=25,
 
-    eval_strategy="steps",
+    evaluation_strategy="steps",
     eval_steps=200,
     save_steps=400,
     save_total_limit=2,
@@ -171,11 +181,11 @@ trainer = Trainer(
 )
 
 # ============================================================
-# 8. TRAIN ONCE — NO DUPLICATED LOOP
+# 8. TRAIN ONCE — NO DUPLICATION
 # ============================================================
 trainer.train()
 
-# Log eval results into CSV
+# Write eval metrics to CSV
 log_path = f"{STUDENT_MODEL_DIR}/training_log.csv"
 with open(log_path, "w", newline="") as f:
     writer = csv.writer(f)
@@ -184,8 +194,8 @@ with open(log_path, "w", newline="") as f:
     for log in trainer.state.log_history:
         if "eval_loss" in log:
             loss = log["eval_loss"]
-            epoch = log.get("epoch", None)
-            step = log.get("step", None)
+            epoch = log.get("epoch")
+            step = log.get("step")
             ppl = math.exp(loss) if loss < 20 else float("inf")
             writer.writerow([epoch, step, loss, ppl])
 
@@ -195,9 +205,9 @@ ppl = math.exp(loss) if loss < 20 else float("inf")
 print(f"\nFINAL EVAL — loss: {loss:.4f}, ppl: {ppl:.2f}")
 
 # ============================================================
-# 9. SAVE MODEL (LoRA adapter)
+# 9. SAVE MODEL + TOKENIZER
 # ============================================================
 trainer.save_model(STUDENT_MODEL_DIR)
 tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
-print("\n✅ TRAINING COMPLETE — Saved to tinyllama-geocode-lora_v3")
+print("\n✅ TRAINING COMPLETE — Saved to tinyllama-geocode-lora_v5")
