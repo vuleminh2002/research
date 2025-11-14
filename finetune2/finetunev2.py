@@ -10,7 +10,7 @@ from transformers import (
     Trainer,
     EarlyStoppingCallback,
     BitsAndBytesConfig,
-    DataCollatorWithPadding,
+    DataCollatorForSeq2Seq,
 )
 from peft import LoraConfig, get_peft_model
 
@@ -25,19 +25,19 @@ train_ds, val_ds = split["train"], split["test"]
 # 2. TOKENIZER — ADD <END> AND MAKE IT EOS + PAD
 # ============================================================
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-STUDENT_MODEL_DIR = "tinyllama-geocode-lora_v5"
+STUDENT_MODEL_DIR = "tinyllama-geocode-lora_v6"
 
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-# Add <END> if not present
+# Add <END> as an extra token (if it's not already there)
 tokenizer.add_special_tokens({"additional_special_tokens": ["<END>"]})
 
-# Configure as EOS + PAD
+# Configure <END> as EOS and PAD token
 tokenizer.eos_token = "<END>"
 tokenizer.pad_token = "<END>"
 END_ID = tokenizer.convert_tokens_to_ids("<END>")
 
-# Save tokenizer
+# Save tokenizer config
 tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
 # ============================================================
@@ -80,24 +80,25 @@ RESPONSE_MARKER = "### Response:\n"
 response_marker_ids = tokenizer(RESPONSE_MARKER, add_special_tokens=False)["input_ids"]
 
 def find_subsequence(main, sub):
-    for i in range(len(main) - len(sub) + 1):
-        if main[i:i+len(sub)] == sub:
+    """Return index where `sub` starts in `main`, or -1 if not found."""
+    n, m = len(main), len(sub)
+    for i in range(n - m + 1):
+        if main[i : i + m] == sub:
             return i
     return -1
 
 def tokenize_example(example):
     instruction = example["instruction"].strip()
     inp = example["input"].strip()
-    out = example["output"].strip()
+    out = example["output"].strip()  # should already end with <END>
 
-    # Create full prompt
     full_prompt = (
         f"### Instruction:\n{instruction}\n\n"
         f"### Input:\n{inp}\n\n"
         f"{RESPONSE_MARKER}{out}"
     )
 
-    # Tokenize without padding (padding happens later with collator)
+    # Tokenize without padding; truncation only
     full_tok = tokenizer(
         full_prompt,
         truncation=True,
@@ -106,36 +107,39 @@ def tokenize_example(example):
 
     ids = full_tok["input_ids"]
 
-    # Find response start
+    # Find where the response starts (right after "### Response:\n")
     marker_index = find_subsequence(ids, response_marker_ids)
     if marker_index == -1:
         resp_start = 0
     else:
         resp_start = marker_index + len(response_marker_ids)
 
-    # Mask labels before the response begins
+    # Create labels: mask everything before resp_start
     labels = []
     for i, tok in enumerate(ids):
         if i < resp_start:
-            labels.append(-100)  # ignore input/inst
+            labels.append(-100)
         else:
-            labels.append(tok)  # learn only output
+            labels.append(tok)
 
     full_tok["labels"] = labels
     return full_tok
 
-
 train_tok = train_ds.map(tokenize_example, remove_columns=train_ds.column_names)
-val_tok = val_ds.map(tokenize_example, remove_columns=train_ds.column_names)
+val_tok = val_ds.map(tokenize_example, remove_columns=val_ds.column_names)
 
-# Dynamic padding collator (required!)
-data_collator = DataCollatorWithPadding(
+# ============================================================
+# 6. DATA COLLATOR — PADS INPUTS *AND* LABELS
+# ============================================================
+data_collator = DataCollatorForSeq2Seq(
     tokenizer=tokenizer,
-    pad_to_multiple_of=8,  # improves GPU performance
+    model=model,
+    label_pad_token_id=-100,
+    pad_to_multiple_of=8,  # optional, but good for tensor cores
 )
 
 # ============================================================
-# 6. TRAINING ARGUMENTS
+# 7. TRAINING ARGUMENTS
 # ============================================================
 training_args = TrainingArguments(
     output_dir=STUDENT_MODEL_DIR,
@@ -149,7 +153,7 @@ training_args = TrainingArguments(
     fp16=True,
     logging_steps=25,
 
-    eval_strategy="steps",
+    evaluation_strategy="steps",
     eval_steps=200,
     save_steps=400,
     save_total_limit=2,
@@ -165,11 +169,11 @@ training_args = TrainingArguments(
 )
 
 # ============================================================
-# 7. TRAINER SETUP
+# 8. TRAINER SETUP
 # ============================================================
 model.enable_input_require_grads()
 model.gradient_checkpointing_enable()
-model.config.use_cache = False
+model.config.use_cache = False  # important for gradient checkpointing
 
 trainer = Trainer(
     model=model,
@@ -181,7 +185,7 @@ trainer = Trainer(
 )
 
 # ============================================================
-# 8. TRAIN ONCE — NO DUPLICATION
+# 9. TRAIN
 # ============================================================
 trainer.train()
 
@@ -205,9 +209,9 @@ ppl = math.exp(loss) if loss < 20 else float("inf")
 print(f"\nFINAL EVAL — loss: {loss:.4f}, ppl: {ppl:.2f}")
 
 # ============================================================
-# 9. SAVE MODEL + TOKENIZER
+# 10. SAVE MODEL + TOKENIZER
 # ============================================================
 trainer.save_model(STUDENT_MODEL_DIR)
 tokenizer.save_pretrained(STUDENT_MODEL_DIR)
 
-print("\n✅ TRAINING COMPLETE — Saved to tinyllama-geocode-lora_v5")
+print("\n✅ TRAINING COMPLETE — Saved to tinyllama-geocode-lora_v6")
