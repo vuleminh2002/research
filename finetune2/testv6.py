@@ -2,7 +2,7 @@ import json
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-MODEL_DIR = "tinyllama-geocode-lora_final"       # your merged model
+MODEL_DIR = "tinyllama-geocode-lora_s1"       # your merged model
 TEST_FILE = "geocode_train_vary_test.jsonl"      # your 4 test examples
 MAX_NEW_TOKENS = 1024
 
