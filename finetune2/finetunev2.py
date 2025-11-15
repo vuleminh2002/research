@@ -30,7 +30,8 @@ print("="*60)
 # ============================================================
 
 def load_jsonl(path):
-    return [json.loads(line) for line in open(path, "r")]
+    with open(path, "r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
 
 raw_data = load_jsonl(TRAIN_FILE)
 print(f"📂 Loaded {len(raw_data)} examples")
@@ -48,6 +49,7 @@ print(f"Train: {len(train_raw)}, Val: {len(val_raw)}")
 
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
+# TinyLlama has no PAD → use EOS as PAD
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -55,7 +57,7 @@ print(f"EOS token = '{tokenizer.eos_token}' (id {tokenizer.eos_token_id})")
 
 
 # ============================================================
-# TOKENIZATION (Option A — SIMPLE & RELIABLE)
+# TOKENIZATION — OPTION A (Robust, No Marker Required)
 # ============================================================
 
 def tokenize_example(ex):
@@ -73,30 +75,41 @@ def tokenize_example(ex):
         padding=False,
     )
 
-    ids = enc["input_ids"]
+    input_ids = enc["input_ids"]
 
-    # Mask EVERYTHING before model output
-    # We simply search for where the output text starts
-    output_start = full_text.index(ex["output"])
+    # Compute token index where OUTPUT begins (safe + precise)
+    output_char_start = full_text.index(ex["output"])
     output_token_start = len(
-        tokenizer(full_text[:output_start], add_special_tokens=False)["input_ids"]
+        tokenizer(full_text[:output_char_start], add_special_tokens=False)["input_ids"]
     )
 
+    # Mask prompt tokens
     labels = [
         tok if i >= output_token_start else -100
-        for i, tok in enumerate(ids)
+        for i, tok in enumerate(input_ids)
     ]
 
     return {
-        "input_ids": ids,
+        "input_ids": input_ids,
         "attention_mask": enc["attention_mask"],
         "labels": labels,
     }
 
 
 print("🔄 Tokenizing...")
-train_ds = Dataset.from_list(train_raw).map(tokenize_example)
-val_ds   = Dataset.from_list(val_raw).map(tokenize_example)
+
+# Your environment does NOT support Dataset.from_list
+train_ds = Dataset.from_dict({
+    "instruction": [ex["instruction"] for ex in train_raw],
+    "input": [ex["input"] for ex in train_raw],
+    "output": [ex["output"] for ex in train_raw],
+}).map(tokenize_example, remove_columns=["instruction", "input", "output"])
+
+val_ds = Dataset.from_dict({
+    "instruction": [ex["instruction"] for ex in val_raw],
+    "input": [ex["input"] for ex in val_raw],
+    "output": [ex["output"] for ex in val_raw],
+}).map(tokenize_example, remove_columns=["instruction", "input", "output"])
 
 dataset = DatasetDict({"train": train_ds, "val": val_ds})
 
@@ -113,8 +126,10 @@ collator = DataCollatorForSeq2Seq(
 
 
 # ============================================================
-# LOAD MODEL FOR LoRA
+# LOAD MODEL + APPLY LORA
 # ============================================================
+
+print("🧠 Loading base model in 8-bit…")
 
 bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
