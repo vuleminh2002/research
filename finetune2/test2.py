@@ -2,12 +2,12 @@ import json
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-MODEL_DIR = "tinyllama-geocode-lora_s1"      # merged model directory
-TEST_FILE = "geocode_train_vary_test.jsonl"  # test dataset with 4 examples
+MODEL_DIR = "tinyllama-geocode-lora_s1"
+TEST_FILE = "geocode_train_vary_test.jsonl"
 MAX_NEW_TOKENS = 1024
 
 print("=" * 60)
-print("🔍 GEOCODE MODEL INFERENCE — WITH EOS DEBUGGING")
+print("🔍 GEOCODE MODEL INFERENCE — TOKEN USAGE DEBUG")
 print("=" * 60)
 
 
@@ -18,7 +18,7 @@ print("\n📚 Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
 
 eos_id = tokenizer.eos_token_id
-print(f"EOS token: {tokenizer.eos_token} (ID {eos_id})")
+print(f"EOS token: {tokenizer.eos_token}  (ID {eos_id})")
 
 print("\n🧠 Loading model...")
 model = AutoModelForCausalLM.from_pretrained(
@@ -26,12 +26,11 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 model.eval()
-
 print("✅ Model loaded\n")
 
 
 # ================================================================
-# Inference helper — with EOS debugging
+# Inference helper — with EOS + token usage debugging
 # ================================================================
 def run_model(instruction, input_text):
     prompt = (
@@ -41,50 +40,41 @@ def run_model(instruction, input_text):
     )
 
     encoded = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_len = encoded["input_ids"].shape[1]
+    prompt_len = encoded["input_ids"].shape[1]
 
     with torch.no_grad():
-        output = model.generate(
+        out = model.generate(
             **encoded,
             max_new_tokens=MAX_NEW_TOKENS,
             eos_token_id=eos_id,
             pad_token_id=eos_id,
             do_sample=False,
             return_dict_in_generate=True,
-            output_scores=True,
-            output_logits=False,
         )
 
-    # Full sequence returned
-    seq = output.sequences[0]
-
-    # Extract only new generated tokens
-    gen_ids = seq[input_len:]
-
-    # -------------------------------
-    # 🔍 DEBUG INFORMATION
-    # -------------------------------
-    print("\n\n===============================")
-    print("🔍 GENERATION DEBUG")
-    print("===============================")
-    print(f"Generated tokens: {len(gen_ids)}")
-    print(f"First 10 tokens: {gen_ids[:10].tolist()}")
-    print(f"Last 10 tokens:  {gen_ids[-10:].tolist()}")
-
+    seq = out.sequences[0]
+    gen_ids = seq[prompt_len:]
     gen_list = gen_ids.tolist()
-    if eos_id in gen_list:
-        eos_pos = gen_list.index(eos_id)
-        print(f"✅ EOS STOP detected at position {eos_pos}")
-    else:
-        print("❌ No EOS detected — model used full max_new_tokens!")
 
-    # Raw decode (no trimming)
+    # RAW decode
     raw_text = tokenizer.decode(gen_list, skip_special_tokens=False)
 
-    # Clean output (trim at </s>)
+    # CLEAN decode (trim at </s>)
     clean_text = raw_text.split("</s>")[0].strip()
 
-    return clean_text, raw_text
+    # Token usage information
+    eos_pos = gen_list.index(eos_id) if eos_id in gen_list else None
+    used_tokens = eos_pos + 1 if eos_pos is not None else len(gen_list)
+
+    return {
+        "clean": clean_text,
+        "raw": raw_text,
+        "prompt_len": prompt_len,
+        "gen_len": len(gen_list),
+        "eos_pos": eos_pos,
+        "used_tokens": used_tokens,
+        "gen_ids": gen_list,
+    }
 
 
 # ================================================================
@@ -104,32 +94,39 @@ for idx, ex in enumerate(examples, start=1):
     print(f"📝 TEST EXAMPLE {idx}/{len(examples)}")
     print("=" * 60)
 
-    instruction = ex["instruction"]
-    input_text = ex["input"]
-    true_output = ex["output"].replace("</s>", "").strip()
+    res = run_model(ex["instruction"], ex["input"])
 
-    # Run model
-    clean_pred, raw_pred = run_model(instruction, input_text)
+    # ===============================
+    # TOKEN USAGE REPORT
+    # ===============================
+    print("\n🔢 TOKEN USAGE")
+    print("-" * 60)
+    print(f"Prompt tokens:       {res['prompt_len']}")
+    print(f"Generated tokens:     {res['gen_len']}")
+    if res["eos_pos"] is not None:
+        print(f"EOS found at index:   {res['eos_pos']}")
+        print(f"Tokens used until EOS:{res['used_tokens']}")
+    else:
+        print("❌ EOS NOT reached — model used full max_new_tokens!")
 
-    # --------------------------
-    # PRINT RESULTS
-    # --------------------------
-
+    # ===============================
+    # INPUT / OUTPUT
+    # ===============================
     print("\n🟦 INPUT:")
     print("-" * 60)
-    print(input_text)
+    print(ex["input"])
 
-    print("\n🤖 RAW MODEL OUTPUT (no trimming):")
+    print("\n🤖 RAW MODEL OUTPUT:")
     print("-" * 60)
-    print(raw_pred)
+    print(res["raw"])
 
-    print("\n🤖 CLEAN MODEL OUTPUT (trimmed):")
+    print("\n🤖 CLEAN MODEL OUTPUT:")
     print("-" * 60)
-    print(clean_pred)
+    print(res["clean"])
 
     print("\n🏷️ TRUE OUTPUT:")
     print("-" * 60)
-    print(true_output)
+    print(ex["output"].replace("</s>", "").strip())
 
     print("\n")
 
