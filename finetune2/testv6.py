@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_DIR = "tinyllama-geocode-lora_final"       # your merged model
 TEST_FILE = "geocode_train_vary_test.jsonl"      # your 4 test examples
-MAX_NEW_TOKENS = 512
+MAX_NEW_TOKENS = 1024
 
 print("=" * 60)
 print("🔍 GEOCODE MODEL INFERENCE — USING </s>")
