@@ -17,7 +17,7 @@ prompt = "Test:"
 inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
 
 # benchmark 128 tokens
-num = 128
+num = 1024
 start = time.time()
 with torch.no_grad():
     out = model.generate(
