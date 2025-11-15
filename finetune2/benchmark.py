@@ -1,21 +1,34 @@
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+# benchmark_raw.py
 import time
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
+MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
 model = AutoModelForCausalLM.from_pretrained(
-    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    MODEL,
     torch_dtype=torch.float16,
-    device_map="auto",
+    device_map="cuda",
+    attn_implementation="flash_attention_2",
 )
 
-tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-
-prompt = "Hello, this is a quick speed test."
+prompt = "Test:"
 inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
 
-t0 = time.time()
-out = model.generate(**inputs, max_new_tokens=512)
-t1 = time.time()
+# benchmark 128 tokens
+num = 128
+start = time.time()
+with torch.no_grad():
+    out = model.generate(
+        **inputs,
+        max_new_tokens=num,
+        do_sample=False,
+        num_beams=1,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+end = time.time()
 
-print("Time:", t1 - t0)
-print("Tokens/sec:", 512 / (t1 - t0))
+print("Time:", end - start)
+print("Tokens/sec:", num / (end - start))
