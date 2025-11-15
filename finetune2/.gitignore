@@ -35,8 +35,24 @@ hf_cache/
 *.onnx
 *.ckpt
 
+# Allow v6 model files
+!tinyllama-geocode-lora_v6/*.safetensors
+!tinyllama-geocode-lora_v6/*.pt
+!tinyllama-geocode-lora_v6/*.bin
+
+# Allow s1 model files
+!tinyllama-geocode-lora_s1/*.safetensors
+!tinyllama-geocode-lora_s1/*.pt
+!tinyllama-geocode-lora_s1/*.bin
+
 # Training outputs
 tinyllama-geocode-lora/
+
+# Allow v6 model
+!tinyllama-geocode-lora_v6/
+
+# Allow s1 model
+!tinyllama-geocode-lora_s1/
 
 # Checkpoints
 checkpoints/
