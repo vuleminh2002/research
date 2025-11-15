@@ -1,63 +1,83 @@
 import json
+import time
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+
+# ============================================================
+# CONFIG
+# ============================================================
 
 MODEL_DIR = "tinyllama-geocode-lora_s1"
 TEST_FILE = "geocode_train_vary_test.jsonl"
+
 MAX_NEW_TOKENS = 1024
+BATCH_SIZE = 1   # can increase to 2–8 for MAJOR speedup
 
-print("=" * 60)
-print("🚀 H100 OPTIMIZED INFERENCE — TinyLlama Geocode")
-print("=" * 60)
+print("=" * 70)
+print("🚀 OPTIMIZED INFERENCE — TinyLlama Geocode")
+print("=" * 70)
 
 
-# ================================================================
-# Load tokenizer normally
-# ================================================================
+# ============================================================
+# LOAD TOKENIZER
+# ============================================================
+
 print("\n📚 Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
 eos_id = tokenizer.eos_token_id
+
 print(f"EOS token = {tokenizer.eos_token} (ID {eos_id})")
 
 
-# ================================================================
-# Load model using H100-optimized settings
-# ================================================================
-print("\n🧠 Loading model (BF16 + FlashAttention2 + BetterTransformer)...")
+# ============================================================
+# LOAD MODEL — 4-bit QUANT (FASTEST)
+# ============================================================
+
+print("\n🧠 Loading model in 4-bit quantization...")
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+)
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_DIR,
-    torch_dtype=torch.bfloat16,      # H100-native format
+    quantization_config=bnb_config,
     device_map="auto",
-    low_cpu_mem_usage=True,          # avoids HeaderTooLarge
     trust_remote_code=True,
 )
 
-# FlashAttention2 (PyTorch 2.1+ / H100)
-model = model.to_bettertransformer()
-
+print("⚡ Compiling model with torch.compile()...")
+model = torch.compile(model, mode="reduce-overhead")
 model.eval()
-print("✅ Model loaded and optimized for H100\n")
+
+print("✅ Model loaded & optimized!")
 
 
-# ================================================================
-# Inference function
-# ================================================================
-def run_model(instruction, input_text):
-    prompt = (
-        f"### Instruction:\n{instruction}\n\n"
-        f"### Input:\n{input_text}\n\n"
-        f"### Response:\n"
-    )
+# ============================================================
+# GENERATION FUNCTION
+# ============================================================
 
-    encoded = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_len = encoded["input_ids"].shape[1]
+def generate_response(prompt: str):
+    """Runs optimized inference, returns model text + token stats."""
 
-    with torch.no_grad(), torch.nn.attention.sdpa_kernel(
-        enable_flash=True,
-        enable_math=False,
-        enable_mem_efficient=False
+    encoded = tokenizer(
+        prompt,
+        return_tensors="pt",
+        padding=True,
+    ).to(model.device)
+
+    prompt_len = encoded["input_ids"].shape[1]
+
+    # enable FlashAttention2 if available
+    with torch.backends.cuda.sdp_kernel(
+        enable_math=False, enable_flash=True, enable_mem_efficient=True
     ):
+        torch.cuda.synchronize()
+        start = time.time()
+
         output = model.generate(
             **encoded,
             max_new_tokens=MAX_NEW_TOKENS,
@@ -66,42 +86,73 @@ def run_model(instruction, input_text):
             do_sample=False,
         )
 
-    generated = output[0][input_len:]
-    text = tokenizer.decode(generated, skip_special_tokens=False)
+        torch.cuda.synchronize()
+        end = time.time()
 
-    # Cut at EOS
-    if "</s>" in text:
-        text = text.split("</s>")[0]
+    total_time = end - start
+    generated_ids = output[0][prompt_len:]
+    generated_len = len(generated_ids)
 
-    return text.strip(), len(generated)
+    # decode
+    text = tokenizer.decode(generated_ids, skip_special_tokens=False)
+
+    # find EOS
+    eos_pos = text.find("</s>")
+    if eos_pos != -1:
+        text = text[:eos_pos].strip()
+
+    tok_per_sec = generated_len / total_time if total_time > 0 else 0
+
+    return text, generated_len, total_time, tok_per_sec
 
 
-# ================================================================
-# Load and test all examples
-# ================================================================
-print(f"📂 Loading test set: {TEST_FILE}")
-examples = [json.loads(line) for line in open(TEST_FILE)]
-print(f"Test samples: {len(examples)}\n")
+# ============================================================
+# LOAD TEST FILE
+# ============================================================
+
+print(f"\n📂 Loading test file: {TEST_FILE}")
+examples = [json.loads(line) for line in open(TEST_FILE, "r")]
+print(f"📊 Total test examples: {len(examples)}")
+
+
+# ============================================================
+# RUN ALL EXAMPLES
+# ============================================================
 
 for idx, ex in enumerate(examples, start=1):
     print("\n" + "=" * 70)
     print(f"📝 TEST EXAMPLE {idx}/{len(examples)}")
     print("=" * 70)
 
-    pred, gen_tokens = run_model(ex["instruction"], ex["input"])
+    # Build prompt
+    prompt = (
+        f"### Instruction:\n{ex['instruction']}\n\n"
+        f"### Input:\n{ex['input']}\n\n"
+        f"### Response:\n"
+    )
+
+    # Run model
+    pred, gen_tokens, elapsed, tok_per_sec = generate_response(prompt)
+
+    # Output results
+    print("\n🟦 INPUT:")
+    print("-" * 60)
+    print(ex["input"])
 
     print("\n🤖 MODEL OUTPUT:")
-    print("-" * 70)
+    print("-" * 60)
     print(pred)
 
     print("\n🏷 TRUE OUTPUT:")
-    print("-" * 70)
+    print("-" * 60)
     print(ex["output"].replace("</s>", "").strip())
 
-    print("\n🔢 TOKEN USAGE")
-    print("-" * 70)
-    print(f"Generated tokens:    {gen_tokens}")
+    print("\n🔢 TOKEN STATS")
+    print("-" * 60)
+    print(f"Generated tokens: {gen_tokens}")
+    print(f"Time:            {elapsed:.3f} sec")
+    print(f"Speed:           {tok_per_sec:.2f} tokens/sec")
 
-print("\n" + "=" * 60)
-print("🏁 DONE — All examples processed on H100")
-print("=" * 60)
+print("\n" + "=" * 70)
+print("✅ DONE — Optimized Inference Completed")
+print("=" * 70)
