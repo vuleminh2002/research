@@ -34,26 +34,18 @@ print(f"EOS token = {tokenizer.eos_token} (ID {eos_id})")
 # LOAD MODEL — 4-bit QUANT (FASTEST)
 # ============================================================
 
-print("\n🧠 Loading model in 4-bit quantization...")
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,
-)
+print("\n🧠 Loading FP16 model (fastest for TinyLlama)...")
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_DIR,
-    quantization_config=bnb_config,
-    device_map="auto",
-    trust_remote_code=True,
+    torch_dtype=torch.float16,
+    device_map="cuda",
+    attn_implementation="flash_attention_2",
 )
-
-print("⚡ Compiling model with torch.compile()...")
-model = torch.compile(model, mode="reduce-overhead")
 model.eval()
 
-print("✅ Model loaded & optimized!")
+print("⚡ Using FlashAttention2 (FAST)")
+
 
 
 # ============================================================
