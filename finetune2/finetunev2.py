@@ -7,153 +7,140 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorForSeq2Seq,
+    BitsAndBytesConfig,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from transformers import BitsAndBytesConfig
 
-
-# ===============================================================
+# ==============================================================
 # CONFIG
-# ===============================================================
+# ==============================================================
+DATA_FILE = "geocode_train_vary.jsonl"
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-TRAIN_FILE = "geocode_train_vary.jsonl"
 OUTPUT_DIR = "tinyllama-geocode-lora_FINAL"
-MAX_LENGTH = 2048
-RESPONSE_MARKER = "### Response:\n"
+MAX_LEN = 2048
 
+RESPONSE_MARKER = "### Response:"    # <- NEW: No trailing newline
 
 print("="*60)
-print("🚀 GEOCODE RANGE CLASSIFIER — FINAL TRAINING SCRIPT")
+print("🚀 FINAL TRAINING SCRIPT — TINYLLAMA GEOCODE")
 print("="*60)
 
 
-# ===============================================================
-# LOAD DATASET
-# ===============================================================
-
+# ==============================================================
+# LOAD DATA
+# ==============================================================
 def load_jsonl(path):
-    out = []
-    with open(path, "r") as f:
-        for line in f:
-            out.append(json.loads(line))
-    return out
+    with open(path, "r", encoding="utf-8") as f:
+        return [json.loads(x) for x in f]
 
 
-print(f"\n📂 Loading dataset: {TRAIN_FILE}")
-raw_data = load_jsonl(TRAIN_FILE)
-print(f"Total examples: {len(raw_data)}")
+raw = load_jsonl(DATA_FILE)
+print(f"📂 Loaded {len(raw)} examples")
 
-# 90/10 split
-split_idx = int(0.9 * len(raw_data))
-train_raw = raw_data[:split_idx]
-val_raw   = raw_data[split_idx:]
+split = int(len(raw) * 0.9)
+train_raw = raw[:split]
+val_raw   = raw[split:]
 
 print(f"Train: {len(train_raw)}, Val: {len(val_raw)}")
 
 
-# ===============================================================
+# ==============================================================
 # TOKENIZER
-# ===============================================================
-
+# ==============================================================
 print("\n🧠 Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
+# pad token fix
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
-print(f"EOS token: {tokenizer.eos_token} (ID {tokenizer.eos_token_id})")
+print(f"EOS token = {tokenizer.eos_token!r} (id {tokenizer.eos_token_id})")
+
+# Tokenize the response marker ONCE
+marker_ids = tokenizer(RESPONSE_MARKER, add_special_tokens=False)["input_ids"]
 
 
-# ===============================================================
-# TOKENIZATION — FIXED WITH TRUE TOKEN-LEVEL MARKER SEARCH
-# ===============================================================
-
-def find_subsequence(tokens, marker):
+# ==============================================================
+# SUBSTRING SEARCH (ROBUST AGAINST CHAT TEMPLATE WRAPS)
+# ==============================================================
+def find_marker(tokens, marker):
     """
-    Returns the first index where `marker` appears inside `tokens`.
-    Token-level safe search — avoids SentencePiece boundary errors.
+    Safe subsequence search for the marker *anywhere* inside the
+    chat-template-wrapped prompt.
     """
-    for i in range(len(tokens) - len(marker) + 1):
-        if tokens[i:i+len(marker)] == marker:
+    m = len(marker)
+    for i in range(len(tokens) - m + 1):
+        if tokens[i:i+m] == marker:
             return i
     return -1
 
 
+# ==============================================================
+# TOKENIZATION + MASKING
+# ==============================================================
 def tokenize_example(ex):
     """
-    Builds:
-    ### Instruction:
-    ...
-    ### Input:
-    ...
-    ### Response:
-    <output>
-    
-    Then masks everything before the response.
+    Build Llama-chat style input with:
+    ### Instruction
+    ### Input
+    ### Response
+    Reasoning...
     """
-    # Construct full text
     full_text = (
         f"### Instruction:\n{ex['instruction']}\n\n"
         f"### Input:\n{ex['input']}\n\n"
-        f"{RESPONSE_MARKER}{ex['output']}"
+        f"{RESPONSE_MARKER}\n{ex['output']}"
     )
 
-    tokenized = tokenizer(
+    enc = tokenizer(
         full_text,
         truncation=True,
-        max_length=MAX_LENGTH,
+        max_length=MAX_LEN,
         padding=False,
     )
 
-    input_ids = tokenized["input_ids"]
-    attention_mask = tokenized["attention_mask"]
+    ids = enc["input_ids"]
 
-    # Tokenize the RESPONSE_MARKER only
-    marker_ids = tokenizer(RESPONSE_MARKER, add_special_tokens=False)["input_ids"]
-
-    # Find marker correctly in token space
-    idx = find_subsequence(input_ids, marker_ids)
+    # find marker safely
+    idx = find_marker(ids, marker_ids)
 
     if idx == -1:
-        # Should never happen, but fallback
-        resp_start = int(0.6 * len(input_ids))
-    else:
-        resp_start = idx + len(marker_ids)
+        # This will *never* happen at training time with TinyLlama Chat.
+        # But ensure safety:
+        raise ValueError("❌ Marker not found in encode() — unexpected.")
 
-    # Create labels: mask prompt, learn response only
+    # response starts *after* the marker ids
+    resp_start = idx + len(marker_ids)
+
     labels = []
-    for i, tok in enumerate(input_ids):
+    for i, tok in enumerate(ids):
         if i < resp_start:
             labels.append(-100)
         else:
             labels.append(tok)
 
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
-    }
+    enc["labels"] = labels
+    return enc
 
 
-print("\n🔄 Tokenizing train...")
-train_ds = Dataset.from_list(train_raw).map(
-    tokenize_example,
-    remove_columns=["instruction", "input", "output"],
-)
+print("\n🔄 Tokenizing train dataset...")
+train_ds = Dataset.from_dict({
+    "instruction": [x["instruction"] for x in train_raw],
+    "input":       [x["input"] for x in train_raw],
+    "output":      [x["output"] for x in train_raw],
+}).map(tokenize_example, remove_columns=["instruction", "input", "output"])
 
-print("🔄 Tokenizing val...")
-val_ds = Dataset.from_list(val_raw).map(
-    tokenize_example,
-    remove_columns=["instruction", "input", "output"],
-)
+print("🔄 Tokenizing val dataset...")
+val_ds = Dataset.from_dict({
+    "instruction": [x["instruction"] for x in val_raw],
+    "input":       [x["input"] for x in val_raw],
+    "output":      [x["output"] for x in val_raw],
+}).map(tokenize_example, remove_columns=["instruction", "input", "output"])
 
-dataset = DatasetDict({"train": train_ds, "val": val_ds})
 
-
-# ===============================================================
-# DATA COLLATOR — CORRECT LABEL PADDING
-# ===============================================================
-
+# ==============================================================
+# DATA COLLATOR (CORRECTLY PADS LABELS WITH -100)
+# ==============================================================
 collator = DataCollatorForSeq2Seq(
     tokenizer=tokenizer,
     model=None,
@@ -162,90 +149,94 @@ collator = DataCollatorForSeq2Seq(
 )
 
 
-# ===============================================================
-# LOAD MODEL + APPLY LORA
-# ===============================================================
-
-print("\n🧠 Loading base model...")
-
-bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+# ==============================================================
+# LOAD MODEL IN 8-BIT
+# ==============================================================
+print("\n🧠 Loading base model in 8-bit...")
+bnb = BitsAndBytesConfig(load_in_8bit=True)
 
 model = AutoModelForCausalLM.from_pretrained(
     BASE_MODEL,
+    quantization_config=bnb,
     device_map="auto",
-    quantization_config=bnb_config,
 )
 
 model = prepare_model_for_kbit_training(model)
 
-print("🔧 Applying LoRA...")
-lora_cfg = LoraConfig(
+
+# ==============================================================
+# APPLY LORA
+# ==============================================================
+print("\n🔧 Applying LoRA...")
+lora = LoraConfig(
     r=32,
     lora_alpha=64,
-    target_modules=["q_proj", "v_proj"],
     lora_dropout=0.05,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    bias="none",
     task_type="CAUSAL_LM",
 )
 
-model = get_peft_model(model, lora_cfg)
+model = get_peft_model(model, lora)
 model.print_trainable_parameters()
 
 
-# ===============================================================
-# TRAINER ARGS
-# ===============================================================
-
+# ==============================================================
+# TRAINER + ARGS
+# ==============================================================
 use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 
 args = TrainingArguments(
     output_dir=OUTPUT_DIR,
+    num_train_epochs=3,
     per_device_train_batch_size=2,
     per_device_eval_batch_size=2,
     gradient_accumulation_steps=8,
-    num_train_epochs=3,
     learning_rate=3e-4,
-    warmup_steps=50,
+    warmup_steps=100,
     lr_scheduler_type="cosine",
+
     logging_steps=10,
-    save_steps=400,
     eval_strategy="epoch",
+    save_strategy="epoch",
+
+    save_total_limit=2,
+    report_to="none",
+
     bf16=use_bf16,
     fp16=not use_bf16,
-    report_to="none",
+
     optim="adamw_torch_fused",
     load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
 )
 
-
-# ===============================================================
-# TRAIN
-# ===============================================================
 
 trainer = Trainer(
     model=model,
     args=args,
-    train_dataset=dataset["train"],
-    eval_dataset=dataset["val"],
+    train_dataset=train_ds,
+    eval_dataset=val_ds,
     data_collator=collator,
 )
 
-print("\n" + "="*60)
+print("\n================================================")
 print("🚀 STARTING TRAINING")
-print("="*60)
+print("================================================")
 
 trainer.train()
 
 
-# ===============================================================
-# MERGE LORA & SAVE FINAL MODEL
-# ===============================================================
-
-print("\n🔧 Merging LoRA weights...")
+# ==============================================================
+# MERGE & SAVE
+# ==============================================================
+print("\n🔧 Merging LoRA into base model...")
 merged = model.merge_and_unload()
 
-print("💾 Saving merged model...")
+print("💾 Saving final merged model...")
 merged.save_pretrained(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 
-print("\n🎉 TRAINING COMPLETE — MODEL SAVED!")
-print(f"📦 Output: {OUTPUT_DIR}")
+print("\n🎉 TRAINING COMPLETE!")
+print(f"Model saved to: {OUTPUT_DIR}")
