@@ -1,116 +1,51 @@
+#!/usr/bin/env python3
+"""
+Geocode Model Testing Script with Full Output Visibility
+Tests a fine-tuned model's ability to determine which candidates are inside a rectangle
+"""
+
 import json
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import re
+from pathlib import Path
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
-MODEL_DIR = "tinyllama-geocode-lora_final"
+MODEL_PATH = "tinyllama-geocode-lora_final"
 TEST_FILE = "geocode_train_vary_test.jsonl"
-OUTPUT_FILE = "geocode_test_results.jsonl"
-
-print("=" * 60)
-print("🧪 GEOCODE MODEL TESTING")
-print("=" * 60)
+RESULTS_FILE = "geocode_test_results.jsonl"
+SUMMARY_FILE = "geocode_test_results_summary.json"
+MAX_NEW_TOKENS = 1024  # Increased to ensure full reasoning is generated
 
 # ============================================================
-# LOAD MODEL & TOKENIZER
+# HELPER FUNCTIONS
 # ============================================================
-print(f"\n🧠 Loading model from {MODEL_DIR}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_DIR,
-    device_map="auto",
-    torch_dtype=torch.float16,  # For faster inference
-)
-model.eval()
 
-print(f"✅ Model loaded")
-print(f"   EOS token: {tokenizer.eos_token} (ID: {tokenizer.eos_token_id})")
+def extract_inside_ids(text):
+    """Extract inside_ids from model output"""
+    match = re.search(r"inside_ids:\s*\[(.*?)\]", text, re.DOTALL)
+    if match:
+        ids_str = match.group(1)
+        # Extract quoted strings
+        ids = re.findall(r"'([^']*)'", ids_str)
+        return ids
+    return []
 
-# ============================================================
-# LOAD TEST DATA
-# ============================================================
-print(f"\n📂 Loading test data from {TEST_FILE}...")
-with open(TEST_FILE, "r") as f:
-    test_data = [json.loads(line) for line in f]
-
-print(f"✅ Loaded {len(test_data)} test examples")
-
-# ============================================================
-# INFERENCE FUNCTION
-# ============================================================
-def generate_response(instruction, input_text, max_new_tokens=1024):
-    """Generate model prediction for given instruction and input."""
-    prompt = (
-        f"### Instruction:\n{instruction}\n\n"
-        f"### Input:\n{input_text}\n\n"
-        f"### Response:\n"
-    )
-    
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_length = inputs.input_ids.shape[1]
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,  # Deterministic generation
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    
-    # Decode only the generated part (not the prompt)
-    generated_ids = outputs[0][input_length:]
-    response = tokenizer.decode(generated_ids, skip_special_tokens=True)
-    
-    return response.strip()
-
-# ============================================================
-# EXTRACT inside_ids FROM RESPONSE
-# ============================================================
-def extract_inside_ids(response):
-    """Extract the inside_ids list from model response."""
-    try:
-        # Find "inside_ids:" in the response
-        if "inside_ids:" not in response:
-            return None
-        
-        # Extract the part after "inside_ids:"
-        ids_part = response.split("inside_ids:")[1].strip()
-        
-        # Use eval to parse the list (safe since we control the input)
-        # Remove any trailing text after the list
-        if "]" in ids_part:
-            ids_part = ids_part[:ids_part.index("]") + 1]
-        
-        inside_ids = eval(ids_part)
-        return inside_ids
-    except Exception as e:
-        print(f"⚠️  Error extracting inside_ids: {e}")
-        return None
-
-# ============================================================
-# EVALUATE PREDICTIONS
-# ============================================================
-def evaluate_prediction(predicted_ids, true_ids):
-    """Calculate precision, recall, F1 for a single example."""
-    if predicted_ids is None:
-        return {"precision": 0.0, "recall": 0.0, "f1": 0.0, "exact_match": False}
-    
+def calculate_metrics(predicted_ids, true_ids):
+    """Calculate precision, recall, F1, and exact match"""
     pred_set = set(predicted_ids)
     true_set = set(true_ids)
     
     if len(pred_set) == 0:
         precision = 0.0
+        recall = 0.0 if len(true_set) > 0 else 1.0
     else:
-        precision = len(pred_set & true_set) / len(pred_set)
-    
-    if len(true_set) == 0:
-        recall = 0.0
-    else:
-        recall = len(pred_set & true_set) / len(true_set)
+        true_positives = len(pred_set & true_set)
+        precision = true_positives / len(pred_set)
+        recall = true_positives / len(true_set) if len(true_set) > 0 else 0.0
     
     if precision + recall == 0:
         f1 = 0.0
@@ -120,127 +55,231 @@ def evaluate_prediction(predicted_ids, true_ids):
     exact_match = pred_set == true_set
     
     return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "exact_match": exact_match
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'exact_match': exact_match
     }
 
 # ============================================================
-# RUN TESTS
+# MAIN TESTING FUNCTION
 # ============================================================
-print("\n" + "=" * 60)
-print("🔍 RUNNING TESTS")
-print("=" * 60)
 
-results = []
-all_metrics = []
-
-for idx, example in enumerate(test_data, 1):
-    print(f"\n{'=' * 60}")
-    print(f"📝 TEST EXAMPLE {idx}/{len(test_data)}")
-    print(f"{'=' * 60}")
+def main():
+    print("=" * 60)
+    print("🧪 GEOCODE MODEL TESTING WITH FULL OUTPUT VISIBILITY")
+    print("=" * 60)
     
-    # Get ground truth
-    true_output = example["output"].replace("</s>", "").strip()
-    true_ids = extract_inside_ids(true_output)
-    
-    # Generate prediction
-    print("\n⏳ Generating prediction...")
-    predicted_output = generate_response(
-        example["instruction"],
-        example["input"]
+    # Load model
+    print(f"\n🧠 Loading model from {MODEL_PATH}...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_PATH,
+        device_map="auto",
+        torch_dtype=torch.float16,
     )
-    predicted_ids = extract_inside_ids(predicted_output)
+    model.eval()
+    print("✅ Model loaded")
+    print(f"   EOS token: {tokenizer.eos_token} (ID: {tokenizer.eos_token_id})")
+    print(f"   PAD token: {tokenizer.pad_token} (ID: {tokenizer.pad_token_id})")
     
-    # Evaluate
-    metrics = evaluate_prediction(predicted_ids, true_ids)
-    all_metrics.append(metrics)
+    # Load test data
+    print(f"\n📂 Loading test data from {TEST_FILE}...")
+    test_examples = []
+    with open(TEST_FILE, 'r') as f:
+        for line in f:
+            test_examples.append(json.loads(line))
+    print(f"✅ Loaded {len(test_examples)} test examples")
     
-    # Display results
-    print("\n" + "-" * 60)
-    print("🟦 INPUT (first 200 chars):")
-    print("-" * 60)
-    print(example["input"][:200] + "..." if len(example["input"]) > 200 else example["input"])
+    # Run tests
+    print("\n" + "=" * 60)
+    print("🔍 RUNNING TESTS")
+    print("=" * 60)
     
-    print("\n" + "-" * 60)
-    print("🤖 MODEL OUTPUT:")
-    print("-" * 60)
-    print(predicted_output)
+    results = []
+    all_metrics = []
     
-    print("\n" + "-" * 60)
-    print("🏷️  GROUND TRUTH:")
-    print("-" * 60)
-    print(true_output)
+    for idx, example in enumerate(test_examples, 1):
+        print("\n" + "=" * 60)
+        print(f"📝 TEST EXAMPLE {idx}/{len(test_examples)}")
+        print("=" * 60)
+        
+        # Prepare input
+        input_text = example['input']
+        ground_truth = example['output']
+        
+        # Tokenize
+        inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+        input_ids = inputs['input_ids']
+        
+        print("\n⏳ Generating prediction...")
+        
+        # Generate
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids,
+                max_new_tokens=MAX_NEW_TOKENS,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+            )
+        
+        # Decode outputs
+        full_output_with_tokens = tokenizer.decode(outputs[0], skip_special_tokens=False)
+        generated_only_with_tokens = tokenizer.decode(outputs[0][len(input_ids[0]):], skip_special_tokens=False)
+        generated_clean = tokenizer.decode(outputs[0][len(input_ids[0]):], skip_special_tokens=True)
+        
+        # Get token IDs
+        generated_token_ids = outputs[0][len(input_ids[0]):].tolist()
+        
+        # Display input
+        print("\n" + "-" * 60)
+        print("🟦 INPUT (first 200 chars):")
+        print("-" * 60)
+        print(input_text[:200] + "...")
+        
+        # Display RAW output with special tokens
+        print("\n" + "-" * 60)
+        print("🔍 RAW MODEL OUTPUT (WITH SPECIAL TOKENS):")
+        print("-" * 60)
+        print(generated_only_with_tokens)
+        print("-" * 60)
+        
+        # Display token IDs
+        print("\n" + "-" * 60)
+        print("🔢 GENERATED TOKEN IDs (first 50):")
+        print("-" * 60)
+        print(generated_token_ids[:50])
+        if len(generated_token_ids) > 50:
+            print(f"... and {len(generated_token_ids) - 50} more tokens")
+        print("-" * 60)
+        
+        # Check for EOS token
+        eos_token_id = tokenizer.eos_token_id
+        print("\n" + "-" * 60)
+        print("🛑 EOS TOKEN CHECK:")
+        print("-" * 60)
+        if eos_token_id in generated_token_ids:
+            eos_position = generated_token_ids.index(eos_token_id)
+            print(f"✅ EOS token </s> (ID: {eos_token_id}) found at position {eos_position}/{len(generated_token_ids)}")
+            print(f"   Generation stopped naturally")
+        else:
+            print(f"❌ EOS token </s> (ID: {eos_token_id}) NOT found")
+            print(f"   Model likely hit max_new_tokens limit ({MAX_NEW_TOKENS})")
+            print(f"   Consider increasing MAX_NEW_TOKENS")
+        
+        # Display clean output
+        print("\n" + "-" * 60)
+        print("📝 CLEAN MODEL OUTPUT (special tokens removed):")
+        print("-" * 60)
+        print(generated_clean)
+        print("-" * 60)
+        
+        # Check for reasoning
+        print("\n" + "-" * 60)
+        print("🧠 REASONING CHECK:")
+        print("-" * 60)
+        if "Reasoning:" in generated_clean:
+            print("✅ Model DID generate reasoning")
+            # Extract reasoning section
+            reasoning_section = generated_clean.split("inside_ids:")[0]
+            print("\nReasoning preview (first 500 chars):")
+            print(reasoning_section[:500] + "...")
+        else:
+            print("❌ Model did NOT generate reasoning")
+            print("   This may indicate:")
+            print("   - Model wasn't trained properly to generate reasoning")
+            print("   - max_new_tokens is too low")
+            print("   - Model learned to skip reasoning")
+        
+        # Extract predicted IDs
+        predicted_ids = extract_inside_ids(generated_clean)
+        true_ids = extract_inside_ids(ground_truth)
+        
+        # Display ground truth
+        print("\n" + "-" * 60)
+        print("🏷️  GROUND TRUTH:")
+        print("-" * 60)
+        print(ground_truth[:500] + "..." if len(ground_truth) > 500 else ground_truth)
+        
+        # Calculate metrics
+        metrics = calculate_metrics(predicted_ids, true_ids)
+        all_metrics.append(metrics)
+        
+        # Display evaluation
+        print("\n" + "-" * 60)
+        print("📊 EVALUATION:")
+        print("-" * 60)
+        print(f"Predicted IDs: {predicted_ids}")
+        print(f"True IDs:      {true_ids}")
+        print(f"Precision:     {metrics['precision']*100:.2f}%")
+        print(f"Recall:        {metrics['recall']*100:.2f}%")
+        print(f"F1 Score:      {metrics['f1']*100:.2f}%")
+        print(f"Exact Match:   {'✅ YES' if metrics['exact_match'] else '❌ NO'}")
+        
+        # Save result
+        results.append({
+            'example_id': idx,
+            'input': input_text,
+            'predicted_output': generated_clean,
+            'ground_truth': ground_truth,
+            'predicted_ids': predicted_ids,
+            'true_ids': true_ids,
+            'metrics': metrics,
+            'has_reasoning': "Reasoning:" in generated_clean,
+            'has_eos_token': eos_token_id in generated_token_ids,
+            'num_tokens_generated': len(generated_token_ids)
+        })
     
-    print("\n" + "-" * 60)
-    print("📊 EVALUATION:")
-    print("-" * 60)
-    print(f"Predicted IDs: {predicted_ids}")
-    print(f"True IDs:      {true_ids}")
-    print(f"Precision:     {metrics['precision']:.2%}")
-    print(f"Recall:        {metrics['recall']:.2%}")
-    print(f"F1 Score:      {metrics['f1']:.2%}")
-    print(f"Exact Match:   {'✅ YES' if metrics['exact_match'] else '❌ NO'}")
+    # Calculate overall metrics
+    print("\n" + "=" * 60)
+    print("📊 OVERALL RESULTS")
+    print("=" * 60)
     
-    # Save result
-    results.append({
-        "example_id": idx,
-        "instruction": example["instruction"],
-        "input": example["input"],
-        "predicted_output": predicted_output,
-        "true_output": true_output,
-        "predicted_ids": predicted_ids,
-        "true_ids": true_ids,
-        "metrics": metrics
-    })
+    avg_precision = sum(m['precision'] for m in all_metrics) / len(all_metrics)
+    avg_recall = sum(m['recall'] for m in all_metrics) / len(all_metrics)
+    avg_f1 = sum(m['f1'] for m in all_metrics) / len(all_metrics)
+    exact_match_rate = sum(m['exact_match'] for m in all_metrics) / len(all_metrics)
+    
+    print(f"\nTotal Examples:    {len(test_examples)}")
+    print(f"Average Precision: {avg_precision*100:.2f}%")
+    print(f"Average Recall:    {avg_recall*100:.2f}%")
+    print(f"Average F1 Score:  {avg_f1*100:.2f}%")
+    print(f"Exact Match Rate:  {exact_match_rate*100:.2f}% ({sum(m['exact_match'] for m in all_metrics)}/{len(all_metrics)})")
+    
+    # Check reasoning generation
+    num_with_reasoning = sum(1 for r in results if r['has_reasoning'])
+    print(f"\nReasoning Generated: {num_with_reasoning}/{len(results)} examples ({num_with_reasoning/len(results)*100:.1f}%)")
+    
+    num_with_eos = sum(1 for r in results if r['has_eos_token'])
+    print(f"EOS Token Found:     {num_with_eos}/{len(results)} examples ({num_with_eos/len(results)*100:.1f}%)")
+    
+    # Save results
+    print(f"\n💾 Saving results to {RESULTS_FILE}...")
+    with open(RESULTS_FILE, 'w') as f:
+        for result in results:
+            f.write(json.dumps(result) + '\n')
+    print(f"✅ Results saved to: {RESULTS_FILE}")
+    
+    summary = {
+        'total_examples': len(test_examples),
+        'avg_precision': avg_precision,
+        'avg_recall': avg_recall,
+        'avg_f1': avg_f1,
+        'exact_match_rate': exact_match_rate,
+        'reasoning_generation_rate': num_with_reasoning / len(results),
+        'eos_token_rate': num_with_eos / len(results),
+    }
+    
+    with open(SUMMARY_FILE, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f"✅ Summary saved to: {SUMMARY_FILE}")
+    
+    print("\n" + "=" * 60)
+    print("🎉 TESTING COMPLETE!")
+    print("=" * 60)
 
-# ============================================================
-# AGGREGATE METRICS
-# ============================================================
-print("\n" + "=" * 60)
-print("📊 OVERALL RESULTS")
-print("=" * 60)
-
-avg_precision = sum(m["precision"] for m in all_metrics) / len(all_metrics)
-avg_recall = sum(m["recall"] for m in all_metrics) / len(all_metrics)
-avg_f1 = sum(m["f1"] for m in all_metrics) / len(all_metrics)
-exact_match_count = sum(1 for m in all_metrics if m["exact_match"])
-exact_match_rate = exact_match_count / len(all_metrics)
-
-print(f"\nTotal Examples:    {len(test_data)}")
-print(f"Average Precision: {avg_precision:.2%}")
-print(f"Average Recall:    {avg_recall:.2%}")
-print(f"Average F1 Score:  {avg_f1:.2%}")
-print(f"Exact Match Rate:  {exact_match_rate:.2%} ({exact_match_count}/{len(test_data)})")
-
-# ============================================================
-# SAVE RESULTS
-# ============================================================
-print(f"\n💾 Saving results to {OUTPUT_FILE}...")
-with open(OUTPUT_FILE, "w") as f:
-    for result in results:
-        f.write(json.dumps(result) + "\n")
-
-# Also save summary
-summary_file = OUTPUT_FILE.replace(".jsonl", "_summary.json")
-summary = {
-    "total_examples": len(test_data),
-    "metrics": {
-        "average_precision": avg_precision,
-        "average_recall": avg_recall,
-        "average_f1": avg_f1,
-        "exact_match_rate": exact_match_rate,
-        "exact_match_count": exact_match_count
-    },
-    "per_example_metrics": all_metrics
-}
-
-with open(summary_file, "w") as f:
-    json.dump(summary, f, indent=2)
-
-print(f"✅ Results saved to: {OUTPUT_FILE}")
-print(f"✅ Summary saved to: {summary_file}")
-print("\n" + "=" * 60)
-print("🎉 TESTING COMPLETE!")
-print("=" * 60 + "\n")
+if __name__ == "__main__":
+    main()
