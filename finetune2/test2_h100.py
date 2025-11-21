@@ -8,10 +8,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 # CONFIG
 # ============================================================
 
-MODEL_DIR = "/research/finetune2/tinyllama-geocode-merged-bf16"
+MODEL_DIR = "/research/finetune2/tinyllama-geocode-merged-s2"
 TEST_FILE = "geocode_train_vary_test.jsonl"
 
-MAX_NEW_TOKENS = 1024   # you can tune this
+MAX_NEW_TOKENS = 2048   # you can tune this
 BATCH_SIZE = 1
 
 torch.set_float32_matmul_precision("high")
