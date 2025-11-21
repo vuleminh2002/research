@@ -3,7 +3,7 @@ import time
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
-
+import re
 # ============================================================
 # CONFIG
 # ============================================================
@@ -92,22 +92,38 @@ def generate_response(prompt: str):
 # ============================================================
 
 def extract_inside_ids(text):
-    """Extract inside_ids: ['a','b'] from model output."""
-    if "inside_ids" not in text:
+    """
+    Robust extraction of inside_ids from model output.
+
+    Matches patterns like:
+      inside_ids: ['id1','id2']
+      inside_ids=['id1', 'id2']
+      inside_ids :
+         ['id1','id2']
+      inside_ids: []
+    """
+    # Remove end tokens like </s>
+    text = text.replace("</s>", "").strip()
+
+    # Regex to capture everything inside the brackets
+    match = re.search(r"inside_ids\s*:\s*\[(.*?)\]", text, re.DOTALL)
+
+    if not match:
         return []
-    try:
-        segment = text.split("inside_ids")[1]
-        start = segment.find("[")
-        end = segment.find("]")
-        if start == -1 or end == -1:
-            return []
-        raw = segment[start+1:end].strip()
-        if not raw:
-            return []
-        ids = [s.strip().strip("'").strip('"') for s in raw.split(",")]
-        return [x for x in ids if x]
-    except:
+
+    content = match.group(1).strip()
+
+    if not content:
         return []
+
+    # Split by comma, strip quotes
+    ids = [
+        item.strip().strip("'").strip('"')
+        for item in content.split(",")
+        if item.strip()
+    ]
+
+    return ids
 
 def compute_metrics(pred, gold):
     pred = set(pred)
