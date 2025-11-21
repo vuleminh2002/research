@@ -1,9 +1,10 @@
 import json
 import time
 import torch
+import re
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
-import re
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -28,8 +29,10 @@ tokenizer.pad_token = tokenizer.eos_token
 eos_id = tokenizer.eos_token_id
 
 # ============================================================
-# LOAD BASE MODEL IN 4-BIT + LORA
+# LOAD BASE MODEL IN 4-BIT + APPLY LORA
 # ============================================================
+
+print("\n🧠 Loading base 4-bit model...")
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -43,11 +46,15 @@ base = AutoModelForCausalLM.from_pretrained(
     device_map={"": 0},
 )
 
+print("🔧 Loading LoRA adapters...")
 model = PeftModel.from_pretrained(base, LORA_DIR)
 model.eval()
 
+print("✅ Model ready!")
+
+
 # ============================================================
-# GENERATION (TPS)
+# GENERATION FUNCTION (TPS)
 # ============================================================
 
 @torch.inference_mode()
@@ -61,8 +68,11 @@ def generate_response(prompt: str):
 
     prompt_len = encoded["input_ids"].shape[1]
 
+    # FlashAttention2 enabled
     with torch.backends.cuda.sdp_kernel(
-        enable_flash=True, enable_math=False, enable_mem_efficient=True
+        enable_math=False,
+        enable_flash=True,
+        enable_mem_efficient=True
     ):
         torch.cuda.synchronize()
         start = time.time()
@@ -78,62 +88,71 @@ def generate_response(prompt: str):
         torch.cuda.synchronize()
         end = time.time()
 
-    gen_ids = output[0][prompt_len:]
-    gen_len = len(gen_ids)
+    generated_ids = output[0][prompt_len:]
+    gen_len = len(generated_ids)
     elapsed = end - start
-    decoded = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
+    decoded = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
     tps = gen_len / elapsed if elapsed > 0 else 0
+
     return decoded, gen_len, elapsed, tps
 
 
 # ============================================================
-# NEW: ID EXTRACTION + METRICS
+# ROBUST inside_ids EXTRACTION (FIXED)
 # ============================================================
 
 def extract_inside_ids(text):
     """
-    Robust extraction of inside_ids from model output.
+    Extract inside_ids from ANY of the following patterns:
+    
+    inside_ids: ['a','b']
+    inside_ids :
+        ['a', 'b']
+    inside_ids: []
+    inside_ids: ['a','b']</s>
 
-    Matches patterns like:
-      inside_ids: ['id1','id2']
-      inside_ids=['id1', 'id2']
-      inside_ids :
-         ['id1','id2']
-      inside_ids: []
+    Handles newlines, spaces, quotes, trailing </s>, etc.
     """
-    # Remove end tokens like </s>
+    # Remove special tokens
     text = text.replace("</s>", "").strip()
 
-    # Regex to capture everything inside the brackets
+    # Regex: capture everything inside [ ... ]
     match = re.search(r"inside_ids\s*:\s*\[(.*?)\]", text, re.DOTALL)
-
     if not match:
         return []
 
     content = match.group(1).strip()
-
     if not content:
         return []
 
-    # Split by comma, strip quotes
-    ids = [
-        item.strip().strip("'").strip('"')
-        for item in content.split(",")
-        if item.strip()
-    ]
+    # Split by comma
+    parts = content.split(",")
 
+    ids = []
+    for p in parts:
+        token = p.strip().strip("'").strip('"')
+        if token:
+            ids.append(token)
     return ids
 
-def compute_metrics(pred, gold):
-    pred = set(pred)
-    gold = set(gold)
+
+# ============================================================
+# METRICS
+# ============================================================
+
+def compute_metrics(pred_ids, gold_ids):
+    pred = set(pred_ids)
+    gold = set(gold_ids)
+
     tp = len(pred & gold)
     fp = len(pred - gold)
     fn = len(gold - pred)
-    precision = tp / (tp + fp) if (tp+fp) else 1.0
-    recall    = tp / (tp + fn) if (tp+fn) else 1.0
-    f1        = 2*precision*recall/(precision+recall) if (precision+recall) else 1.0
+
+    precision = tp / (tp + fp) if tp + fp > 0 else 1.0
+    recall    = tp / (tp + fn) if tp + fn > 0 else 1.0
+    f1        = (2 * precision * recall / (precision + recall)) if (precision + recall) else 1.0
+
     return precision, recall, f1
 
 
@@ -141,11 +160,9 @@ def compute_metrics(pred, gold):
 # LOAD TEST DATA
 # ============================================================
 
-examples = [json.loads(l) for l in open(TEST_FILE, "r", encoding="utf-8")]
-print(f"📦 Loaded {len(examples)} test examples\n")
+examples = [json.loads(line) for line in open(TEST_FILE, "r", encoding="utf-8")]
+print(f"📂 Loaded {len(examples)} test examples\n")
 
-# For global metrics
-global_tp = global_fp = global_fn = 0
 
 # ============================================================
 # RUN INFERENCE
@@ -162,37 +179,33 @@ for idx, ex in enumerate(examples, start=1):
     pred_text, gen_tokens, elapsed, tps = generate_response(prompt)
     gold_text = ex["output"]
 
-    # NEW: Extract inside_ids
-    gold_ids = extract_inside_ids(gold_text)
+    # Extract IDs
     pred_ids = extract_inside_ids(pred_text)
+    gold_ids = extract_inside_ids(gold_text)
 
-    # NEW: Compute metrics
-    p, r, f = compute_metrics(pred_ids, gold_ids)
+    # Compute metrics
+    precision, recall, f1 = compute_metrics(pred_ids, gold_ids)
 
     print("\n" + "=" * 70)
     print(f"📝 Example {idx}/{len(examples)}")
     print("=" * 70)
 
-    print("\n🤖 MODEL OUTPUT:")
-    print(pred_text)
-
-    print("\n🏷 TRUE OUTPUT:")
-    print(gold_text.strip())
+    print("\n🤖 MODEL OUTPUT:\n" + pred_text)
+    print("\n🏷 TRUE OUTPUT:\n" + gold_text.strip())
 
     print("\n🔎 Extracted IDs:")
     print(f"Predicted: {pred_ids}")
     print(f"Gold     : {gold_ids}")
 
     print("\n📊 SCORES:")
-    print(f"Precision: {p:.3f}")
-    print(f"Recall   : {r:.3f}")
-    print(f"F1       : {f:.3f}")
+    print(f"Precision: {precision:.3f}")
+    print(f"Recall   : {recall:.3f}")
+    print(f"F1       : {f1:.3f}")
 
     print("\n🚀 PERFORMANCE:")
     print(f"Tokens: {gen_tokens}")
     print(f"Time  : {elapsed:.3f}s")
     print(f"TPS   : {tps:.2f} tokens/s")
-
 
 print("\n" + "=" * 70)
 print("🎉 DONE — Fast inference + scoring complete")
