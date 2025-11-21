@@ -17,7 +17,7 @@ from transformers import BitsAndBytesConfig
 
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 TRAIN_FILE = "geocode_train_vary.jsonl"
-OUTPUT_DIR = "tinyllama-geocode-lora_s1"
+OUTPUT_DIR = "tinyllama-geocode-lora_s2"
 
 MAX_LENGTH = 2048
 VAL_SPLIT = 0.1
