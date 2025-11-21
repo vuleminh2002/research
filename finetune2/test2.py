@@ -10,7 +10,7 @@ from peft import PeftModel
 # ============================================================
 
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-LORA_DIR   = "tinyllama-geocode-lora_s2"
+LORA_DIR   = "/research/finetune2/tinyllama-geocode-lora_s2"
 TEST_FILE  = "geocode_train_vary_test.jsonl"
 
 MAX_NEW_TOKENS = 2048
@@ -47,7 +47,12 @@ base = AutoModelForCausalLM.from_pretrained(
 )
 
 print("🔧 Loading LoRA adapters...")
-model = PeftModel.from_pretrained(base, LORA_DIR)
+model = PeftModel.from_pretrained(
+    base,
+    LORA_DIR,
+    is_trainable=False,
+    local_files_only=True,   # <-- CRITICAL FIX
+)
 model.eval()
 
 print("✅ Model ready!")
