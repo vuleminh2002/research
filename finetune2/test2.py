@@ -16,7 +16,7 @@ BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 LORA_DIR   = "tinyllama-geocode-lora_s2"
 TEST_FILE  = "geocode_train_vary_test.jsonl"
 
-MAX_NEW_TOKENS = 512
+MAX_NEW_TOKENS = 1024
 BATCH_SIZE = 1   # Increase later if you want huge TPS
 
 
