@@ -45,6 +45,11 @@ hf_cache/
 !tinyllama-geocode-lora_s1/*.pt
 !tinyllama-geocode-lora_s1/*.bin
 
+# Allow s2 model files
+!tinyllama-geocode-lora_s2/*.safetensors
+!tinyllama-geocode-lora_s2/*.pt
+!tinyllama-geocode-lora_s2/*.bin
+
 # Training outputs
 tinyllama-geocode-lora/
 
@@ -53,6 +58,9 @@ tinyllama-geocode-lora/
 
 # Allow s1 model
 !tinyllama-geocode-lora_s1/
+
+# Allow s2 model
+!tinyllama-geocode-lora_s2/
 
 # Checkpoints
 checkpoints/

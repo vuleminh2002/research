@@ -1,3 +1,6 @@
 tinyllama-geocode-lora_s1/*.bin filter=lfs diff=lfs merge=lfs -text
 tinyllama-geocode-lora_s1/*.safetensors filter=lfs diff=lfs merge=lfs -text
 tinyllama-geocode-lora_s1/*.pt filter=lfs diff=lfs merge=lfs -text
+tinyllama-geocode-lora_s2/*.safetensors filter=lfs diff=lfs merge=lfs -text
+tinyllama-geocode-lora_s2/*.pt filter=lfs diff=lfs merge=lfs -text
+tinyllama-geocode-lora_s2/*.bin filter=lfs diff=lfs merge=lfs -text
